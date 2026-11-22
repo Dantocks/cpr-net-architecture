@@ -10,6 +10,11 @@ This module brings the **tools** to run a NET Architecture – **not the NET con
 3. **Place the Black ICE and Demon tokens on those scenes yourself.** The Black ICE / Demon actors are **not part of this module** – create them yourself in the Actors tab first.
 4. **Never place a Demon on Floor 1.**
 
+<img width="999" height="398" alt="image" src="https://github.com/user-attachments/assets/e714d51a-8abd-4922-b1a8-4710084f0b01" />
+<img width="1082" height="667" alt="image" src="https://github.com/user-attachments/assets/e3f24737-e17d-45ef-8dfe-ffab52d29ba3" />
+<img width="305" height="950" alt="image" src="https://github.com/user-attachments/assets/afc79f83-ee11-4fff-b810-8cf4de2a908e" />
+
+
 ## Features
 - Turns any token into an **Access Point** – configure it, lock/release it for players
 - **Jack In / Jack Out** from the token's right-click menu – your Netrunner stays selected
