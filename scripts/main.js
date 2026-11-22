@@ -3,6 +3,7 @@
  * Access Points, Jack In / Jack Out, the NET window with floors, branches, passages, Black ICE and Demons,
  * NET actions with chat cards, Going Quiet. Works without Pneuma's Combat Tools.
  * v1.0.1: right-click on an Access Point keeps your selected Netrunner (as in the Combat Tools).
+ * v1.0.4: Banhammer attacks Black ICE / Demons (Interface + 1 + 1d10 vs DEF, 2d6 REZ).
  * v1.0.3: GitHub manifest / download links.
  * v1.0.2: runs side by side with the original Pneuma's Combat Tools (own CSS classes and data attributes,
  *   so neither touches the other's chat cards or styles). Only the GM edit of the Combat Tools, which has the

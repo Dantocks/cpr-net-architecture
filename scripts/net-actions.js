@@ -49,6 +49,7 @@ export const NET_ACTIONS = {
     quietjack: { id: "quietjack", label: "Quiet Jack In", icon: "fa-user-secret", ability: "interface", versus: "int", hint: "Jack In quietly (1 extra NET Action): Interface + 1d10 vs the Interface + 1d10 of every Watcher in the architecture – beat them all to enter undetected." },
     stealth: { id: "stealth", label: "Evade Detection", icon: "fa-user-secret", ability: "cloak", versus: "per", hint: "Stealthed: Interface + Cloak bonus + 1d10 vs a Black ICE's PER + 1d10 (instead of Speed) or a Watcher's Interface + Pathfinder bonus + 1d10 – no NET Action." },
     sword: { id: "sword", label: "Sword attack", icon: "fa-sword", ability: "zap", versus: "def", hint: "Sword: Interface + 1 (Sword, does not stack) + 1d10 vs the target's DEF + 1d10 (a Demon defends with its Interface) – 3d6 REZ to Black ICE and Demons." },
+    banhammer: { id: "banhammer", label: "Banhammer attack", icon: "fa-hammer", ability: "zap", versus: "def", hint: "Banhammer: Interface + 1 (Banhammer, does not stack) + 1d10 vs the target's DEF + 1d10 (a Demon defends with its Interface) – 2d6 REZ to Black ICE and Demons (its 3d6 only hit non-Black ICE programs)." },
 };
 /** what makes sense on the floor the Netrunner stands on (Pathfinder always) */
 /** the Netrunner's Sword program (installed / rezzed), if any */
@@ -56,8 +57,13 @@ export function swordOf(actor) {
     const programs = (actor?.itemTypes?.program ?? Array.from(actor?.items ?? []).filter((i) => String(i.type) === "program"));
     return programs.find(p => /\bsword\b/i.test(String(p.name)) && (p.system?.isInstalled || p.system?.isRezzed || p.system?.isInstalledInActor));
 }
-/** Zap and Sword: attacks on a Black ICE / Demon's REZ */
-const rezAttack = (action) => action === "zap" || action === "sword";
+/** the Netrunner's Banhammer program (installed / rezzed), if any */
+export function banhammerOf(actor) {
+    const programs = (actor?.itemTypes?.program ?? Array.from(actor?.items ?? []).filter((i) => String(i.type) === "program"));
+    return programs.find(p => /\bban\s*-?hammer\b/i.test(String(p.name)) && (p.system?.isInstalled || p.system?.isRezzed || p.system?.isInstalledInActor));
+}
+/** Zap, Sword and Banhammer: attacks on a Black ICE / Demon's REZ */
+const rezAttack = (action) => action === "zap" || action === "sword" || action === "banhammer";
 export function actionsForKinds(kinds, actor, stealthed = false) {
     const ids = [];
     // Going Quiet: stealthed, the Netrunner evades detection instead of the Speed check
@@ -75,6 +81,8 @@ export function actionsForKinds(kinds, actor, stealthed = false) {
         ids.push("zap");
     if ((kinds.has("ice") || kinds.has("demon")) && swordOf(actor))
         ids.push("sword");
+    if ((kinds.has("ice") || kinds.has("demon")) && banhammerOf(actor))
+        ids.push("banhammer");
     ids.push("pathfinder");
     return ids.map(id => NET_ACTIONS[id]);
 }
@@ -233,6 +241,9 @@ async function runnerRoll(runner, action) {
         // Sword: +1 to the attack (one bonus, however many Swords are installed)
         if (action.id === "sword" && !(Array.isArray(roll.mods) && roll.mods.some((x) => /sword/i.test(String(x?.source ?? "")))))
             roll.addMod([{ value: 1, source: "Sword" }]);
+        // Banhammer: +1 to the attack (its ATK, one bonus however many are installed)
+        if (action.id === "banhammer" && !(Array.isArray(roll.mods) && roll.mods.some((x) => /banhammer/i.test(String(x?.source ?? "")))))
+            roll.addMod([{ value: 1, source: "Banhammer" }]);
         // Speedy Gonzalvez stacks: +2 per rezzed copy, minus what the system's roll already has
         // Going Quiet: + any bonus to Cloak Checks (Eraser +2 while rezzed), unless the system's roll has it already
         if (action.id === "stealth" && eraserRezzed(actor) && !(Array.isArray(roll.mods) && roll.mods.some((x) => /eraser/i.test(String(x?.source ?? x?.name ?? "")))))
@@ -254,7 +265,7 @@ async function runnerRoll(runner, action) {
         return { total: Number(roll.resultTotal), html: await nativeCard(roll), dice: diceJSON(roll), roller: game.user.id };
     }
     // this system version has no such Interface ability: Interface rank + 1d10
-    return statRoll(`${action.label} (Interface)`, Number(netRole.system?.rank ?? 0) || 0, action.id === "speed" ? speedBonus(actor) : action.id === "stealth" && eraserRezzed(actor) ? [{ value: 2, source: "Eraser" }] : action.id === "sword" ? [{ value: 1, source: "Sword" }] : action.id === "slide" && skunkPenalty(actor) ? [{ value: skunkPenalty(actor), source: "Skunk" }] : []);
+    return statRoll(`${action.label} (Interface)`, Number(netRole.system?.rank ?? 0) || 0, action.id === "speed" ? speedBonus(actor) : action.id === "stealth" && eraserRezzed(actor) ? [{ value: 2, source: "Eraser" }] : action.id === "sword" ? [{ value: 1, source: "Sword" }] : action.id === "banhammer" ? [{ value: 1, source: "Banhammer" }] : action.id === "slide" && skunkPenalty(actor) ? [{ value: skunkPenalty(actor), source: "Skunk" }] : []);
 }
 // ---------- Black ICE / Demon values ----------
 function numberAt(doc, paths) {
@@ -399,6 +410,8 @@ function cardHTML(s) {
             summary = `${esc(s.runner.name)} <span class="${runnerWins ? "cprnet-hit" : "cprnet-miss"}">${runnerWins ? "zaps" : "misses"}</span> ${esc(s.ice?.name)}`;
         else if (s.action === "sword")
             summary = `${esc(s.runner.name)}'s Sword <span class="${runnerWins ? "cprnet-hit" : "cprnet-miss"}">${runnerWins ? "hits" : "misses"}</span> ${esc(s.ice?.name)}`;
+        else if (s.action === "banhammer")
+            summary = `${esc(s.runner.name)}'s Banhammer <span class="${runnerWins ? "cprnet-hit" : "cprnet-miss"}">${runnerWins ? "hits" : "misses"}</span> ${esc(s.ice?.name)}`;
         // Slide (the Netrunner's roll vs the chosen ICE's PER): slides away – or the ICE follows
         else if (s.action === "slide")
             summary = runnerWins ? `${esc(s.runner.name)} <span class="cprnet-hit">slides away</span> from ${esc(s.ice?.name)}` : `${esc(s.ice?.name)} <span class="cprnet-miss">follows</span> ${esc(s.runner.name)}`;
@@ -548,6 +561,9 @@ const damageFormula = (s) => {
     // Sword: 3d6 REZ to Black ICE and Demons (2d6 only against non-Black ICE programs – no such targets here)
     if (s.type === "runner-vs-ice" && s.action === "sword" && s.outcome === "runner")
         return "3d6";
+    // Banhammer: only 2d6 REZ to Black ICE (and Demons) – its 3d6 are for non-Black ICE programs
+    if (s.type === "runner-vs-ice" && s.action === "banhammer" && s.outcome === "runner")
+        return "2d6";
     // a Demon attacks with Zap: 1d6 (its description may name other dice, e.g. "1d10")
     if (iceSuccessful(s) && s.type === "ice-vs-runner" && isDemon(sideActor(s, s.ice)))
         return "1d6";

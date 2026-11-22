@@ -614,8 +614,8 @@ async function syncStealth(message) {
     if (!doc)
         return;
     const state = stealthOf(doc);
-    // attacking a Black ICE / Demon (Zap, Sword) gives the Netrunner away – hit or miss
-    if (s.type === "runner-vs-ice" && (s.action === "zap" || s.action === "sword") && s.state !== "cancelled") {
+    // attacking a Black ICE / Demon (Zap, Sword, Banhammer) gives the Netrunner away – hit or miss
+    if (s.type === "runner-vs-ice" && (s.action === "zap" || s.action === "sword" || s.action === "banhammer") && s.state !== "cancelled") {
         if (state === "active" && !stealthDone.has(message.id)) {
             stealthDone.add(message.id);
             await setStealth(doc, "broken");
