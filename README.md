@@ -1,4 +1,4 @@
-# NET Architecture (Cyberpunk RED) v1.0.3
+# NET Architecture (Cyberpunk RED) v1.0.4
 
 Run Cyberpunk RED NET Architectures in **Foundry VTT V12** – Access Points, Jack In / Jack Out, a live NET window and all NET actions with chat cards.
 Made with Claude.ai.
@@ -21,6 +21,7 @@ This module brings the **tools** to run a NET Architecture – **not the NET con
 - **NET window** showing the architecture: floors, branches, passages, Black ICE and Demons
 - Runners only see the floors they have already reached
 - All **NET actions** with chat cards and the system's own dice (Dice So Nice works)
+- Attack Black ICE & Demons with **Zap, Sword or Banhammer**
 - **Black ICE & Demons** fight back – damage, effects and status are applied automatically
 - **Going Quiet** and optional automatic **Lying in Wait**
 - Link a journal with your NET rules for quick reference
@@ -31,7 +32,7 @@ This module brings the **tools** to run a NET Architecture – **not the NET con
 ```
 https://github.com/Dantocks/cpr-net-architecture/releases/latest/download/module.json
 ```
-**Manual:** download `cpr-net-architecture_v1.0.3.zip` from the latest release and unzip it into `Data/modules/cpr-net-architecture/`.
+**Manual:** download `cpr-net-architecture_v1.0.4.zip` from the latest release and unzip it into `Data/modules/cpr-net-architecture/`.
 
 Then:
 1. Restart Foundry if needed
