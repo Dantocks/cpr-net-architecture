@@ -13,7 +13,10 @@ This module brings the **tools** to run a NET Architecture – **not the NET con
 <img width="999" height="398" alt="image" src="https://github.com/user-attachments/assets/e714d51a-8abd-4922-b1a8-4710084f0b01" />
 <img width="1082" height="667" alt="image" src="https://github.com/user-attachments/assets/e3f24737-e17d-45ef-8dfe-ffab52d29ba3" />
 <img width="305" height="950" alt="image" src="https://github.com/user-attachments/assets/afc79f83-ee11-4fff-b810-8cf4de2a908e" />
-
+<img width="927" height="382" alt="image" src="https://github.com/user-attachments/assets/7777f9eb-6a8d-41f4-9463-42dfe08c267d" />
+<img width="907" height="360" alt="image" src="https://github.com/user-attachments/assets/e341c9ab-f0f9-4054-8053-dd7644af3b23" />
+<img width="513" height="369" alt="image" src="https://github.com/user-attachments/assets/4b6a92ff-72f5-4935-afc6-edb8b6378f5a" />
+<img width="289" height="686" alt="image" src="https://github.com/user-attachments/assets/4c70e548-911d-484c-a67c-51a0286af279" />
 
 ## Features
 - Turns any token into an **Access Point** – configure it, lock/release it for players
