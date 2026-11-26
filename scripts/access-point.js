@@ -5,7 +5,8 @@
 // Demon tokens). The Netrunner always enters on the leftmost floor tile (unless the GM picked another
 // entry floor) and moves floor to floor by clicking a floor or with the arrow keys. "Jack Out" removes it.
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { primaryGM } from "./support.js";
+import { primaryGM, ACTIONS_FLAG, PENALTY_FLAG, netActionsLimit, netActionsOf, netActionsPenaltyOf, spendNetActions } from "./support.js";
+import { runnerAttackItems, glueOf, setForceOut, postUnsafeCard, linkUnsafeSummary, iceMetOnCards } from "./runner-combat.js";
 import { actionsForKinds, configureFloor, FLOOR_KINDS, floorInfo, ICE_ACTIONS, RUNNER_ACTIONS, runNetAction, startIceAction, hasPassed, passageOpen, togglePassage, clearPassages, restoreRez, postJackOutSummary, goingQuiet, stealthOf, isStealthed, postStealthCard, stealthResult } from "./net-actions.js";
 const MODULE = "cpr-net-architecture";
 const CHANNEL = "module.cpr-net-architecture";
@@ -14,6 +15,10 @@ const RUN_FLAG = "netrun";
 const NET_FOLDER = /^net$/i;
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const flagOf = (doc, key) => foundry.utils.getProperty(doc, `flags.${MODULE}.${key}`);
+function netActionsHTML(doc) {
+    const n = netActionsOf(doc), max = netActionsLimit(doc), penalty = Number(netActionsPenaltyOf(doc).active ?? 0) || 0;
+    return `<b>${n}</b>${max ? `<small>/${max}</small>` : ""}${penalty ? `<small class="cprnet-netactions-penalty" title="Vrizzbolt: −${penalty} this turn"> (Vrizzbolt)</small>` : ""}`;
+}
 export const accessPointData = (doc) => {
     const data = flagOf(doc, AP_FLAG);
     return data?.scene ? data : undefined;
@@ -130,6 +135,21 @@ async function hideAllButEntry(scene, data) {
         await scene.updateEmbeddedDocuments("Token", tokens.map(({ _id, hidden }) => ({ _id, hidden })));
     return [...tiles, ...tokens].filter(u => u.hidden).length;
 }
+/** GM: reveal every tile, drawing and token of the architecture (the opposite of the hiding by "Reset Net Arch").
+ *  Returns the number revealed. */
+async function revealAll(scene) {
+    if (!game.user?.isGM || !scene)
+        return 0;
+    const open = (list) => Array.from(list ?? []).filter(d => d.hidden).map(d => ({ _id: d.id, hidden: false }));
+    const tiles = open(scene.tiles), drawings = open(scene.drawings), tokens = open(scene.tokens);
+    if (tiles.length)
+        await scene.updateEmbeddedDocuments("Tile", tiles);
+    if (drawings.length)
+        await scene.updateEmbeddedDocuments("Drawing", drawings);
+    if (tokens.length)
+        await scene.updateEmbeddedDocuments("Token", tokens);
+    return tiles.length + drawings.length + tokens.length;
+}
 // ---------- GM: move Black ICE / Demons floor by floor ----------
 const isIce = (token) => ["blackIce", "demon"].includes(String(token?.actor?.type));
 /** the floor a Black ICE / Demon belongs to: the one it stands on, otherwise the floor right below it in its column
@@ -179,32 +199,69 @@ function iceLayout(scene, floor, tokens, y) {
 }
 /** Moves a Black ICE / Demon token one floor left (-1) or right (+1) – any number per floor, arranged above the
  *  tile (see iceLayout); the floor it left is re-arranged too. */
-export async function moveIceFloor(token, step) {
+export function moveIceFloor(token, step) {
+    return queued(() => moveIceFloorNow(token, step));
+}
+async function moveIceFloorNow(token, step) {
     if (!game.user?.isGM)
         return;
     const doc = token.document ?? token, scene = doc.parent, grid = gridOf(scene);
-    await snapshotStart(scene);
     const floors = floorList(scene);
     if (!floors.length)
         return void ui.notifications.warn("This scene has no floors.");
-    const index = iceFloorIndex(floors, doc, grid);
-    const from = floors[index];
+    const from = floors[iceFloorIndex(floors, doc, grid)];
     // one floor left / right in the same row (branches below are separate rows)
     const row = floors.filter(f => sameRow(from, f) && (step > 0 ? f.bounds.x > from.bounds.x : f.bounds.x < from.bounds.x))
         .sort((a, b) => step > 0 ? a.bounds.x - b.bounds.x : b.bounds.x - a.bounds.x);
-    const to = row[0];
-    if (!to)
+    if (!row[0])
         return void ui.notifications.warn(`${doc.name} is already on the ${step < 0 ? "first" : "last"} floor of this row.`);
-    const toIndex = floors.indexOf(to);
-    const there = iceOnFloor(scene, floors, toIndex);
+    await placeIce(doc, row[0], step > 0);
+}
+/** GM: a Black ICE / Demon goes to any floor (right-click a floor → "Move … here") */
+export function moveIceToFloor(token, floor) {
+    return queued(() => moveIceToFloorNow(token, floor));
+}
+async function moveIceToFloorNow(token, floor) {
+    if (!game.user?.isGM || !floor)
+        return;
+    const doc = token.document ?? token, scene = doc.parent, floors = floorList(scene);
+    const from = floors[iceFloorIndex(floors, doc, gridOf(scene))];
+    if (from?.id === floor.id)
+        return;
+    const to = floors.find(f => f.id === floor.id);
+    if (!to)
+        return;
+    await placeIce(doc, to, !from || centerOf(from.bounds).x <= centerOf(to.bounds).x);
+}
+/** ICE moves run one after another: each one reads the positions the previous one wrote (fast arrow keys or
+ *  several GMs would otherwise arrange from stale positions and stack tokens on top of each other) */
+let iceQueue = Promise.resolve();
+function queued(fn) {
+    const run = iceQueue.then(fn);
+    iceQueue = run.catch(() => { });
+    return run;
+}
+const placeIce = (doc, to, fromLeft) => placeIceNow(doc, to, fromLeft);
+/** puts a Black ICE / Demon above a floor, next to the ICE already there – the floor it left is re-arranged too */
+async function placeIceNow(doc, to, fromLeft) {
+    const scene = doc.parent, grid = gridOf(scene);
+    await snapshotStart(scene);
+    const floors = floorList(scene);
+    const index = iceFloorIndex(floors, doc, grid), from = floors[index];
+    // floorList() builds new objects every call – find the target floor by id (indexOf never matched: ICE stacked)
+    const toIndex = floors.findIndex(f => f.id === to.id);
+    if (toIndex < 0)
+        return;
+    to = floors[toIndex];
+    const there = iceOnFloor(scene, floors, toIndex).filter(t => t.id !== doc.id);
     // height (bottom row): like the ICE already there, otherwise the same offset the token had on its old floor
     const bottom = (list) => Math.max(...list.map(t => t.y));
-    // (measured from the bottom row of its old floor, not from an upper grid row)
-    const y = there.length ? bottom(there) : to.bounds.y + (bottom(iceOnFloor(scene, floors, index)) - from.bounds.y);
+    const old = from ? iceOnFloor(scene, floors, index) : [];
+    const y = there.length ? bottom(there) : to.bounds.y + (old.length && from ? bottom(old) - from.bounds.y : -((doc.height || 1) * grid) - grid * 0.2);
     // coming from the left it joins on the left, coming from the right on the right
-    const arriving = step > 0 ? [doc, ...there] : [...there, doc];
-    const staying = iceOnFloor(scene, floors, index).filter(t => t.id !== doc.id);
-    const updates = [...iceLayout(scene, to, arriving, y), ...(staying.length ? iceLayout(scene, from, staying, bottom(staying)) : [])];
+    const arriving = fromLeft ? [doc, ...there] : [...there, doc];
+    const staying = old.filter(t => t.id !== doc.id);
+    const updates = [...iceLayout(scene, to, arriving, y), ...(staying.length && from ? iceLayout(scene, from, staying, bottom(old)) : [])];
     await scene.updateEmbeddedDocuments("Token", updates);
 }
 /** two floors in the same row: the centre of one lies in the other's height */
@@ -348,8 +405,25 @@ function blockedPrompt(scene, runner, block, proceed) {
     }, { classes: ["dialog", "cprnet-net-blocked"] }).render(true);
 }
 // ---------- GM: Black ICE / Demons in the running combat ----------
-/** the encounter the ICE joins: the one the GM is looking at (the Netrunner's meat-space fight) */
-const targetCombat = () => game.combats?.viewed ?? game.combat ?? undefined;
+/** the encounter a NET token joins: the one of the scene the GM is looking at (the Netrunner's meat-space fight) –
+ *  the same one the Combat Tools' combat bar shows (linked to that scene, or unlinked with combatants there) */
+function targetCombat() {
+    const sceneId = canvas?.scene?.id;
+    const all = Array.from(game.combats ?? []);
+    const here = sceneId ? all.filter(c => c.scene?.id === sceneId || !c.scene && Array.from(c.combatants ?? []).some(p => p.token?.parent?.id === sceneId)) : [];
+    return here.find(c => c.active && c.started) ?? here.find(c => c.active) ?? here.find(c => c.started) ?? here[0]
+        ?? (sceneId ? undefined : game.combats?.viewed ?? game.combat ?? undefined);
+}
+/** open a minimized combat bar on this client – Combat HUD dX if active, otherwise Pneuma's Combat Tools (fork or original) */
+async function openCombatBar() {
+    for (const id of ["pneuma-combat-hud-dx", "pneuma-combattools"]) {
+        if (!game.modules?.get(id)?.active || !game.settings?.settings?.has(`${id}.combatBarMinimized`))
+            continue;
+        if (game.settings.get(id, "combatBarMinimized"))
+            await game.settings.set(id, "combatBarMinimized", false);
+        return;
+    }
+}
 /** combatant of this ICE token in any encounter */
 function iceCombatant(token) {
     const doc = token.document ?? token, scene = doc.parent;
@@ -359,7 +433,7 @@ function iceCombatant(token) {
                 return c;
     return undefined;
 }
-/** like Foundry's "Toggle Combat State": add the ICE to the current encounter or remove it */
+/** like Foundry's "Toggle Combat State": add the token (Black ICE, Demon or Netrunner) to the current encounter or remove it */
 async function toggleIceCombat(token) {
     if (!game.user?.isGM)
         return;
@@ -374,8 +448,11 @@ async function toggleIceCombat(token) {
         // no encounter yet: create one for the scene the GM is on (the meat-space scene of the Access Point)
         combat = await Combat.create({ scene: canvas.scene?.id ?? scene.id, active: true });
     }
+    else if (!combat.active)
+        await combat.activate(); // the combat bar follows the active encounter of the scene
     await combat.createEmbeddedDocuments("Combatant", [{ tokenId: doc.id, sceneId: scene.id, actorId: doc.actorId, hidden: false }]); // visible for everyone
     ui.notifications.info(`${doc.name} added to combat${combat.scene ? ` (${combat.scene.name})` : ""}.`);
+    await openCombatBar().catch(error => console.warn(MODULE, "combat bar", error));
 }
 // ---------- GM: start positions ----------
 const START_FLAG = "netStart";
@@ -518,9 +595,20 @@ async function gmJackOut(request) {
         return;
     if (!user?.isGM && !token.actor?.testUserPermission(user, "OWNER"))
         throw Error("You do not own this Netrunner.");
+    // Unsafe Jack Out (DeckKRASH, "Unsafe Jack Out"): first the card with the rezzed Black ICE it met (needs the token)
+    let unsafe;
+    if (request.unsafe) {
+        try {
+            unsafe = await postUnsafeCard(token, String(request.reason ?? ""));
+        }
+        catch (error) {
+            console.error(MODULE, "Unsafe Jack Out", error);
+        }
+    }
     // everything of this run that can still be undone, in one chat card
     try {
-        await postJackOutSummary(token);
+        const summary = await postJackOutSummary(token, unsafe);
+        await linkUnsafeSummary(unsafe, summary);
     }
     catch (error) {
         console.error(MODULE, "Jack Out summary", error);
@@ -615,7 +703,7 @@ async function syncStealth(message) {
         return;
     const state = stealthOf(doc);
     // attacking a Black ICE / Demon (Zap, Sword, Banhammer) gives the Netrunner away – hit or miss
-    if (s.type === "runner-vs-ice" && (s.action === "zap" || s.action === "sword" || s.action === "banhammer") && s.state !== "cancelled") {
+    if ((s.type === "rvr" || s.type === "runner-vs-ice" && (s.action === "zap" || s.action === "sword" || s.action === "banhammer")) && s.state !== "cancelled") {
         if (state === "active" && !stealthDone.has(message.id)) {
             stealthDone.add(message.id);
             await setStealth(doc, "broken");
@@ -749,50 +837,194 @@ async function chooseNetJournal(onChange) {
     }, { width: 460 }).render(true);
 }
 const views = new Map();
+/** height of the GM button row in the NET window footer (row + gap, see .cprnet-netview-row.is-gm) */
+const GM_ROW = 30;
 class NetView extends Application {
     ap;
     tokenId;
     data; // tokenId "" = spectator view (no own Netrunner)
     view;
     userZoomed = false;
+    /** the token this window acts with (left-click / Tab): a Netrunner, for the GM also a Black ICE / Demon */
+    activeId;
     constructor(ap, tokenId) {
         super();
         this.ap = ap;
         this.tokenId = tokenId;
+        this.activeId = tokenId || "";
         this.data = accessPointData(ap);
     }
     static get defaultOptions() {
-        return foundry.utils.mergeObject(super.defaultOptions, { classes: ["cprnet-netview"], width: 900, height: 360, resizable: true, popOut: true, minimizable: true });
+        // players have no GM button row: the window is that much lower, the map keeps the same size as the GM's
+        return foundry.utils.mergeObject(super.defaultOptions, { classes: ["cprnet-netview"], width: 900, height: game.user?.isGM ? 360 : 360 - GM_ROW, resizable: true, popOut: true, minimizable: true });
     }
     get id() { return this.tokenId ? `cprnet-netview-${this.tokenId}` : `cprnet-netview-view-${this.data.scene}`; }
     get title() { return `NET — ${this.scene?.name ?? "?"}`; }
     get scene() { return game.scenes?.get(this.data.scene); }
     get token() { return this.tokenId ? this.scene?.tokens?.get(this.tokenId) : undefined; }
+    // ---------- the active token ----------
+    /** who may be made active: the GM every Netrunner and Black ICE / Demon, a player only his own Netrunners */
+    canControl(t) {
+        if (!t || (!game.user?.isGM && t.hidden))
+            return false;
+        if (game.user?.isGM)
+            return isRunnerToken(t) || isIce(t);
+        return isRunnerToken(t) && !!t.isOwner;
+    }
+    get active() {
+        const t = this.activeId ? this.scene?.tokens?.get(this.activeId) : undefined;
+        if (t && this.canControl(t))
+            return t;
+        // a player's own Netrunner is active by default
+        if (!game.user?.isGM) {
+            const own = this.token ?? Array.from(this.scene?.tokens ?? []).find(x => isRunnerToken(x) && x.isOwner);
+            if (own)
+                this.activeId = own.id;
+            return own;
+        }
+        return undefined;
+    }
+    activeRunner() { const a = this.active; return a && isRunnerToken(a) ? a : undefined; }
+    /** every token this user can make active, in reading order (Tab) */
+    controllable() {
+        return Array.from(this.scene?.tokens ?? []).filter(t => this.canControl(t)).sort((a, b) => (a.x - b.x) || (a.y - b.y));
+    }
+    setActive(id) {
+        if (this.activeId === id)
+            return;
+        this.activeId = id;
+        this.renderFooter();
+        this.draw();
+    }
+    cycleActive(step) {
+        const list = this.controllable();
+        if (!list.length)
+            return;
+        const i = list.findIndex(t => t.id === this.activeId);
+        const next = list[((i < 0 ? (step > 0 ? -1 : 0) : i) + step + list.length) % list.length];
+        this.setActive(next.id);
+    }
+    // ---------- window ----------
     async _renderInner() {
         const root = document.createElement("div");
         root.className = "cprnet-netview-body";
-        const runner = !!this.tokenId, gm = !!game.user?.isGM;
-        const hint = [runner ? "Click a floor or use the arrow keys to move" : "", "double-click a token: sheet", "right-click a floor or your Netrunner: NET Actions", "wheel: zoom · drag: pan"].filter(Boolean).join(" · ");
-        root.innerHTML = `<div class="cprnet-netview-stage" tabindex="0" aria-label="NET architecture"><div class="cprnet-netview-world"></div></div>
-      <footer class="cprnet-netview-footer">
-        ${runner ? `<button type="button" data-net-step="-1" title="Previous floor"><i class="fas fa-chevron-left"></i></button>
-        <button type="button" data-net-step="1" title="Next floor"><i class="fas fa-chevron-right"></i></button>` : ""}
-        <span class="cprnet-netview-stealth" data-net-stealth hidden></span>
-        <span class="cprnet-netview-hint">${hint}</span>
-        ${gm ? `<button type="button" data-net-start title="Reset the architecture: all Black ICE / Demons back to their start positions, all Netrunners back to the first floor, every Password blocks again, every Black ICE / Demon has full REZ, inactive player tokens are removed and everything except the first floor is hidden"><i class="fas fa-rotate-left"></i> Reset Net Arch</button>` : ""}
-        ${gm ? `<button type="button" data-net-savestart title="Save the current positions of all Black ICE / Demons as the start for &quot;Reset Net Arch&quot;"><i class="fas fa-floppy-disk"></i> Save Start</button>` : ""}
-        ${gm ? `<button type="button" data-net-show title="Open this NET architecture window for all players"><i class="fas fa-users"></i> Show to Players</button>` : ""}
-        <button type="button" data-net-rules title="${esc(netRulesTitle())}"><i class="fas fa-book-open"></i> Netrunning</button>
-        <button type="button" data-net-fit><i class="fas fa-expand"></i> Overview</button>
-        ${runner ? `<button type="button" data-net-jackout><i class="fas fa-plug-circle-xmark"></i> Jack Out</button>` : ""}</footer>`;
+        root.innerHTML = `<div class="cprnet-netview-stage" tabindex="0" aria-label="NET architecture"><div class="cprnet-netview-world"></div><span class="cprnet-netview-keys" aria-hidden="true"><i class="fas fa-keyboard"></i> Keys control the NET</span></div>
+      <footer class="cprnet-netview-footer"></footer>`;
         return $(root);
+    }
+    footerHTML() {
+        // Concept D: row 1 always the same (active token · floor ‹ › · NET Actions · status slot · ? · rules · overview ·
+        // Jack Out), row 2 only for the GM (Show · Save Start | Reset · Unplug all). Nothing shifts any more: controls that
+        // do not apply right now are greyed out instead of disappearing, the status slot keeps its width.
+        const gm = !!game.user?.isGM, active = this.active, runner = active && isRunnerToken(active) ? active : undefined;
+        const hint = ["Click a token: make it active (Tab: next)", "click a floor or use the arrow keys: move the active Netrunner", "right-click a token: actions", gm ? "right-click a floor: floor settings" : "", "double-click: sheet", "wheel: zoom · drag: pan"].filter(Boolean).join("\n");
+        const max = runner ? netActionsLimit(runner) : 0;
+        const off = runner ? "" : " disabled";
+        const canJackOut = !!runner && (gm || runner.isOwner);
+        return `<div class="cprnet-netview-row">
+        <span class="cprnet-netview-active${active ? "" : " is-none"}" title="${active ? `Active: ${esc(active.name)} – left-click another token (or Tab) to switch` : "No active token – left-click a token (or press Tab)"}">${active ? `<img src="${esc(tokenImg(active))}" alt="">` : `<i class="fas fa-hand-pointer"></i>`}<span><small>Active</small>${active ? esc(active.name) : "–"}</span></span>
+        <button type="button" data-net-step="-1" title="Previous floor"${off}><i class="fas fa-chevron-left"></i></button>
+        <button type="button" data-net-step="1" title="Next floor"${off}><i class="fas fa-chevron-right"></i></button>
+        <span class="cprnet-netview-actions${max && netActionsOf(runner) > max ? " is-over" : ""}${runner ? "" : " is-off"}" title="${runner ? `${esc(runner.name)}: NET Actions used this round (Interface 1–3: 2 · 4–6: 3 · 7–9: 4 · 10: 5) – back to 0 at every new round` : "NET Actions – make a Netrunner active"}">
+          NET Actions <button type="button" data-net-act="-1" title="One less"${off}><i class="fas fa-caret-down"></i></button><span data-net-act-value>${runner ? netActionsHTML(runner) : "–"}</span><button type="button" data-net-act="1" title="One more"${off}><i class="fas fa-caret-up"></i></button></span>
+        <span class="cprnet-netview-status"><span class="cprnet-netview-stealth" data-net-stealth hidden></span><span class="cprnet-netview-nostatus" data-net-nostatus>no status</span></span>
+        <span class="cprnet-netview-spacer"></span>
+        <button type="button" class="cprnet-netview-icon" data-net-help title="${esc(hint)}" aria-label="Controls"><i class="fas fa-question"></i></button>
+        <button type="button" class="cprnet-netview-icon" data-net-rules title="${esc(netRulesTitle())}" aria-label="Netrunning rules"><i class="fas fa-book-open"></i></button>
+        <button type="button" class="cprnet-netview-icon" data-net-fit title="Overview: fit the whole architecture" aria-label="Overview"><i class="fas fa-expand"></i></button>
+        <button type="button" class="cprnet-netview-jackout" data-net-jackout title="${canJackOut ? `${esc(runner.name)}: Jack Out` : "Jack Out – make your Netrunner active"}"${canJackOut ? "" : " disabled"}><i class="fas fa-plug-circle-xmark"></i> Jack Out</button>
+        </div>
+        ${gm ? `<div class="cprnet-netview-row is-gm"><span class="cprnet-netview-gmlabel">GM</span>
+        <button type="button" class="cprnet-netview-gm" data-net-show title="Open this NET architecture window for all players"><i class="fas fa-users"></i> Show to Players</button>
+        <button type="button" class="cprnet-netview-gm" data-net-reveal title="Reveal everything: every floor, arrow, drawing, Black ICE and Demon of this architecture becomes visible (&quot;Reset Net Arch&quot; hides it again)"><i class="fas fa-eye"></i> Reveal everything</button>
+        <button type="button" class="cprnet-netview-gm" data-net-savestart title="Save the current positions of all Black ICE / Demons as the start for &quot;Reset Net Arch&quot;"><i class="fas fa-floppy-disk"></i> Save Start</button>
+        <span class="cprnet-netview-sep"></span>
+        <button type="button" class="cprnet-netview-gm" data-net-start title="Reset the architecture: all Black ICE / Demons back to their start positions, all Netrunners back to the first floor, every Password blocks again, every Black ICE / Demon has full REZ, inactive player tokens are removed and everything except the first floor is hidden"><i class="fas fa-rotate-left"></i> Reset Net Arch</button>
+        <button type="button" class="cprnet-netview-gm" data-net-unplug title="Kick every player token out of this NET architecture: each Netrunner jacks out (with its Jack Out summary), every other player token is removed – only Black ICE and Demons stay"><i class="fas fa-plug-circle-minus"></i> Unplug all Netrunners</button>
+        </div>` : ""}`;
+    }
+    /** the footer follows the active token (drawn again whenever it changes) */
+    renderFooter() {
+        const root = this.element?.[0], footer = root?.querySelector(".cprnet-netview-footer");
+        if (!footer)
+            return;
+        footer.innerHTML = this.footerHTML();
+        const report = (error) => ui.notifications.error(String(error?.message ?? error));
+        footer.querySelectorAll("[data-net-step]").forEach(b => b.addEventListener("click", () => void this.stepOrder(Number(b.dataset.netStep)).catch(report)));
+        const rules = footer.querySelector("[data-net-rules]");
+        rules?.addEventListener("click", () => void openNetrunningPage().catch(report));
+        rules?.addEventListener("contextmenu", event => {
+            event.preventDefault();
+            if (!game.user.isGM)
+                return;
+            void chooseNetJournal(() => { rules.title = netRulesTitle(); }).catch(report);
+        });
+        footer.querySelector("[data-net-help]")?.addEventListener("click", (event) => ui.notifications.info(event.currentTarget.title.replace(/\n/g, " · ")));
+        footer.querySelector("[data-net-fit]")?.addEventListener("click", () => { this.userZoomed = false; this.view = undefined; this.draw(); });
+        footer.querySelector("[data-net-jackout]")?.addEventListener("click", () => { const r = this.activeRunner(); if (r)
+            void this.jackOut(r); });
+        footer.querySelectorAll("[data-net-act]").forEach(button => button.addEventListener("click", () => {
+            const token = this.activeRunner();
+            if (!token)
+                return;
+            const next = Math.max(0, netActionsOf(token) + Number(button.dataset.netAct));
+            void token.update({ [`flags.${MODULE}.${ACTIONS_FLAG}`]: next }).catch(report);
+        }));
+        // Reset Net Arch: positions first (the ICE is back above its own floor), then hide all but the first floor
+        footer.querySelector("[data-net-start]")?.addEventListener("click", () => void (async () => {
+            const removed = await removeInactiveRunners(this.scene); // old copies / stray player tokens
+            const moved = await resetPositions(this.scene);
+            const hidden = await hideAllButEntry(this.scene, this.data);
+            const healed = await restoreRez(this.scene); // every Black ICE / Demon back to full REZ
+            ui.notifications.info(`NET Architecture reset: ${removed} inactive player token(s) removed, ${moved} token(s) back at their start positions, ${healed} Black ICE / Demon(s) back to full REZ, ${hidden} tile(s) / token(s) hidden – only the first floor is visible.`);
+        })().catch(report));
+        // GM: everyone out – Netrunners jack out (their summaries are posted), other player tokens are removed; ICE stays
+        footer.querySelector("[data-net-unplug]")?.addEventListener("click", () => void (async () => {
+            const tokens = Array.from(this.scene?.tokens ?? []).filter(t => !isIce(t) && (flagOf(t, RUN_FLAG) || t.actor?.hasPlayerOwner));
+            if (!tokens.length)
+                return void ui.notifications.info("No player tokens in this NET architecture.");
+            const ok = await Dialog.confirm({ title: "Unplug all Netrunners?", defaultYes: false,
+                content: `<p>Kick every player token out of this NET architecture?</p><p>${tokens.map(t => esc(t.name)).join(", ")}</p><p>Netrunners jack out (each gets its Jack Out summary), other player tokens are removed. Black ICE and Demons stay.</p>` });
+            if (!ok)
+                return;
+            let out = 0;
+            for (const token of tokens.filter(t => flagOf(t, RUN_FLAG))) {
+                try {
+                    await sendRequest("jack-out", flagOf(token, `${RUN_FLAG}.accessPoint`) ?? this.ap.uuid, { token: token.id });
+                    out++;
+                }
+                catch (error) {
+                    console.error(MODULE, "Unplug all", token.name, error);
+                }
+            }
+            // what is left: stray player tokens (and Netrunners whose Jack Out failed)
+            const rest = tokens.map(t => t.id).filter(id => this.scene.tokens.get(id));
+            if (rest.length)
+                await this.scene.deleteEmbeddedDocuments("Token", rest);
+            ui.notifications.info(`Unplugged: ${out} Netrunner(s) jacked out${rest.length ? `, ${rest.length} other player token(s) removed` : ""}.`);
+        })().catch(report));
+        // GM: the current positions become the start ("Reset Net Arch" goes back here)
+        footer.querySelector("[data-net-savestart]")?.addEventListener("click", () => void (async () => {
+            const ok = await Dialog.confirm({ title: "Save start positions?", content: "<p>Save the current positions of all Black ICE / Demons in this NET architecture as the start?</p><p>\"Reset Net Arch\" will bring them back here. Netrunners always restart on the first floor.</p>", defaultYes: true });
+            if (!ok)
+                return;
+            await snapshotStart(this.scene, true);
+            const n = Object.keys((flagOf(this.scene, START_FLAG) ?? {})).length;
+            ui.notifications.info(`Start positions saved for ${n} token(s).`);
+        })().catch(report));
+        footer.querySelector("[data-net-reveal]")?.addEventListener("click", () => void revealAll(this.scene).then(n => ui.notifications.info(n ? `Revealed ${n} hidden element(s) of this NET architecture.` : "Everything is already visible.")).catch(report));
+        footer.querySelector("[data-net-show]")?.addEventListener("click", () => {
+            game.socket.emit(CHANNEL, { netrun: "show", accessPoint: this.ap.uuid, gm: game.user.id });
+            ui.notifications.info("NET architecture window opened for all players.");
+        });
+        this.drawStealth();
     }
     activateListeners(html) {
         super.activateListeners(html);
         const root = html[0];
         const stage = root.querySelector(".cprnet-netview-stage");
         const report = (error) => ui.notifications.error(String(error?.message ?? error));
-        // click = move, drag = pan
+        // click = make a token active / move the active Netrunner, drag = pan
         let drag;
         stage.addEventListener("pointerdown", event => {
             if (event.button !== 0 || !this.view)
@@ -831,47 +1063,31 @@ class NetView extends Application {
             this.userZoomed = true;
             this.draw();
         }, { passive: false });
+        // keys: only while the NET view has the focus – and then they stay here (not passed on to the battlemap).
+        // All other keys (WASD, Space, Delete …) still go to Foundry as usual.
         stage.addEventListener("keydown", event => {
+            if (event.key === "Tab") {
+                event.preventDefault();
+                event.stopPropagation();
+                return this.cycleActive(event.shiftKey ? -1 : 1);
+            }
             const dir = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[event.key];
             if (!dir)
                 return;
             event.preventDefault();
+            event.stopPropagation();
+            const active = this.active;
+            if (active && isIce(active)) {
+                if (dir[0] && !event.repeat) // held key: one floor per press
+                    void moveIceFloor(active, dir[0]).catch(report);
+                return;
+            }
             void this.stepDirection(dir[0], dir[1]).catch(report);
         });
-        root.querySelectorAll("[data-net-step]").forEach(b => b.addEventListener("click", () => void this.stepOrder(Number(b.dataset.netStep)).catch(report)));
-        const rules = root.querySelector("[data-net-rules]");
-        rules?.addEventListener("click", () => void openNetrunningPage().catch(report));
-        rules?.addEventListener("contextmenu", event => {
-            event.preventDefault();
-            if (!game.user.isGM)
-                return;
-            void chooseNetJournal(() => { rules.title = netRulesTitle(); }).catch(report);
-        });
-        root.querySelector("[data-net-fit]")?.addEventListener("click", () => { this.userZoomed = false; this.view = undefined; this.draw(); });
-        root.querySelector("[data-net-jackout]")?.addEventListener("click", () => void this.jackOut());
-        // Reset Net Arch: positions first (the ICE is back above its own floor), then hide all but the first floor
-        root.querySelector("[data-net-start]")?.addEventListener("click", () => void (async () => {
-            const removed = await removeInactiveRunners(this.scene); // old copies / stray player tokens
-            const moved = await resetPositions(this.scene);
-            const hidden = await hideAllButEntry(this.scene, this.data);
-            const healed = await restoreRez(this.scene); // every Black ICE / Demon back to full REZ
-            ui.notifications.info(`NET Architecture reset: ${removed} inactive player token(s) removed, ${moved} token(s) back at their start positions, ${healed} Black ICE / Demon(s) back to full REZ, ${hidden} tile(s) / token(s) hidden – only the first floor is visible.`);
-        })().catch(report));
+        stage.addEventListener("keyup", event => { if (event.key === "Tab" || event.key.startsWith("Arrow"))
+            event.stopPropagation(); });
         if (game.user?.isGM)
             void snapshotStart(this.scene).catch(report); // views of older Access Points: current positions become the start
-        // GM: the current positions become the start ("Reset Net Arch" goes back here)
-        root.querySelector("[data-net-savestart]")?.addEventListener("click", () => void (async () => {
-            const ok = await Dialog.confirm({ title: "Save start positions?", content: "<p>Save the current positions of all Black ICE / Demons in this NET architecture as the start?</p><p>\"Reset Net Arch\" will bring them back here. Netrunners always restart on the first floor.</p>", defaultYes: true });
-            if (!ok)
-                return;
-            await snapshotStart(this.scene, true);
-            const n = Object.keys((flagOf(this.scene, START_FLAG) ?? {})).length;
-            ui.notifications.info(`Start positions saved for ${n} token(s).`);
-        })().catch(report));
-        root.querySelector("[data-net-show]")?.addEventListener("click", () => {
-            game.socket.emit(CHANNEL, { netrun: "show", accessPoint: this.ap.uuid, gm: game.user.id });
-            ui.notifications.info("NET architecture window opened for all players.");
-        });
         // double-click a token: its character sheet (rolls from there)
         stage.addEventListener("dblclick", event => {
             const p = this.scenePoint(event), token = p ? this.tokenAt(p.x, p.y) : undefined;
@@ -881,38 +1097,26 @@ class NetView extends Application {
                 return void ui.notifications.warn(`You may not view ${token.name}.`);
             token.actor.sheet?.render(true);
         });
-        // GM: right-click a tile to reveal / hide it for the players
-        // GM-Edit: context menus – floor tiles (NET Actions), the Netrunner (NET Actions, Jack Out), Black ICE / Demons (GM)
+        // right-click: a token – the active token's actions against it; a floor – the GM's floor settings
         stage.addEventListener("contextmenu", event => {
             event.preventDefault();
             const p = this.scenePoint(event);
             if (!p)
                 return;
-            const gm = !!game.user?.isGM;
             const token = this.tokenAt(p.x, p.y);
-            if (token && isIce(token)) {
-                if (gm)
-                    this.iceMenu(event, token, report);
+            if (token)
+                return this.tokenMenu(event, token, report);
+            if (!game.user?.isGM)
                 return;
-            }
-            if (token && flagOf(token, RUN_FLAG)) {
-                if (token.isOwner || gm)
-                    this.runnerMenu(event, token, report);
-                return;
-            }
-            if (token) {
-                if (gm)
-                    this.showMenu(event, token.name, [this.revealItem(token)], report);
-                return;
-            }
-            const tile = this.tileAt(p.x, p.y);
-            if (tile)
-                this.tileMenu(event, tile, report);
+            const floor = this.floorAt(p.x, p.y), tile = this.tileAt(p.x, p.y);
+            if (floor || tile)
+                this.floorMenu(event, floor, tile, report);
         });
         stage.addEventListener("pointerdown", event => { if (!event.target.closest(".cprnet-netview-menu"))
             this.closeMenu(); }, true);
         new ResizeObserver(() => { if (!this.userZoomed)
             this.view = undefined; this.draw(); }).observe(stage);
+        this.renderFooter();
         this.draw();
         stage.focus();
     }
@@ -949,7 +1153,17 @@ class NetView extends Application {
         if (world && this.view)
             world.style.transform = `translate(${this.view.offX}px, ${this.view.offY}px) scale(${this.view.scale})`;
     }
+    /** many document changes at once (Reveal everything, Reset Net Arch …) → one redraw in the next frame */
+    scheduleDraw() {
+        if (this._drawFrame)
+            return;
+        this._drawFrame = requestAnimationFrame(() => { this._drawFrame = 0; this.draw(); });
+    }
     draw() {
+        if (this._drawFrame) {
+            cancelAnimationFrame(this._drawFrame);
+            this._drawFrame = 0;
+        }
         const root = this.element?.[0];
         const stage = root?.querySelector(".cprnet-netview-stage"), world = root?.querySelector(".cprnet-netview-world");
         if (!stage || !world)
@@ -1001,19 +1215,24 @@ class NetView extends Application {
             if (!src || src.includes("*"))
                 src = t.actor?.img ?? "icons/svg/mystery-man.svg";
             const sx = Number(t.texture?.scaleX ?? 1) || 1, sy = Number(t.texture?.scaleY ?? 1) || 1;
-            const own = t.id === this.tokenId;
+            const own = isRunnerToken(t) && t.isOwner && !game.user?.isGM, act = t.id === this.activeId && this.canControl(t);
             // Going Quiet: stealthed Netrunners are drawn "cloaked" (see-through, scanning ring, badge)
             const stealth = flagOf(t, RUN_FLAG) ? stealthOf(t) : undefined;
             const stealthClass = stealth === "active" ? " is-stealth" : stealth === "establishing" ? " is-stealth-pending" : "";
             const badge = stealth === "active" || stealth === "establishing" ? `<span class="cprnet-netview-stealth-badge" title="${stealth === "active" ? "Stealthed" : "Jacking In quietly"}"><i class="fas fa-user-secret"></i></span>` : "";
-            parts.push(`<div class="cprnet-netview-token${own ? " is-own" : ""}${stealthClass}${t.hidden ? " is-hidden" : ""}" data-token="${t.id}" title="${esc(t.name)}${stealth === "active" ? " – stealthed" : ""}"
+            parts.push(`<div class="cprnet-netview-token${own ? " is-own" : ""}${act ? " is-active" : ""}${this.canControl(t) ? " is-controllable" : ""}${stealthClass}${t.hidden ? " is-hidden" : ""}" data-token="${t.id}" title="${esc(t.name)}${stealth === "active" ? " – stealthed" : ""}"
         style="${box(t.x, t.y, (t.width || 1) * grid, (t.height || 1) * grid)};opacity:${t.hidden ? 0.5 : t.alpha ?? 1}"><img src="${esc(src)}" alt="" style="transform:rotate(${t.rotation || 0}deg) scale(${sx},${sy})">${badge}</div>`);
         }
         for (const t of tiles.filter(t => t.elevation >= fgElevation))
             parts.push(tileHTML(t));
         if (dims && foregroundOf(scene))
             parts.push(media(foregroundOf(scene), "cprnet-netview-bg", box(dims.sceneX, dims.sceneY, dims.sceneWidth, dims.sceneHeight)));
-        layer.innerHTML = parts.join("");
+        // rebuild the layer only when something in it changed (tiles can be videos – re-creating them is expensive)
+        const html = parts.join("");
+        if (this._layerHTML !== html || !layer.childElementCount && html) {
+            this._layerHTML = html;
+            layer.innerHTML = html;
+        }
         this.applyView();
         this.drawStealth();
     }
@@ -1023,7 +1242,7 @@ class NetView extends Application {
         const chip = root?.querySelector("[data-net-stealth]");
         if (!root || !chip)
             return;
-        const runner = this.token ?? (game.user?.isGM ? this.actingRunner() : undefined);
+        const runner = this.activeRunner();
         const state = runner ? stealthOf(runner) : undefined;
         const text = { active: "Stealth", establishing: "Jacking in quietly …", broken: "Detected" };
         const icon = { active: "fa-user-secret", establishing: "fa-hourglass-half", broken: "fa-eye" };
@@ -1031,15 +1250,18 @@ class NetView extends Application {
             establishing: "Quiet Jack In: the Interface check against the Watchers is still open (chat card).",
             broken: "Stealth broken: Watchers know about the Netrunner, Black ICE reacts as usual. Jack Out and Jack In quietly again to re-establish it." };
         chip.hidden = !state;
+        const none = root.querySelector("[data-net-nostatus]");
+        if (none)
+            none.hidden = !!state;
         chip.className = `cprnet-netview-stealth${state ? ` is-${state}` : ""}`;
         chip.title = state ? `${runner.name}: ${tip[state]}` : "";
-        chip.innerHTML = state ? `<i class="fas ${icon[state]}" aria-hidden="true"></i> ${esc(text[state])}${this.token ? "" : ` <small>${esc(runner.name)}</small>`}` : "";
+        chip.innerHTML = state ? `<i class="fas ${icon[state]}" aria-hidden="true"></i> ${esc(text[state])}${` <small>${esc(runner.name)}</small>`}` : "";
         root.classList.toggle("is-stealthed", state === "active");
         root.classList.toggle("is-stealth-broken", state === "broken");
     }
     /** reachability overlay per floor for the own Netrunner (GM: the one in this window, otherwise the first one) */
     accessHTML(gm) {
-        const scene = this.scene, runner = this.token ?? (gm ? this.actingRunner() : undefined);
+        const scene = this.scene, runner = this.activeRunner();
         if (!scene || !runner)
             return "";
         const floors = floorList(scene), grid = gridOf(scene);
@@ -1074,33 +1296,40 @@ class NetView extends Application {
         return this.floors().filter(f => inside(f.bounds, x, y)).sort((a, b) => a.bounds.width * a.bounds.height - b.bounds.width * b.bounds.height)[0];
     }
     currentFloor() {
-        const t = this.token, grid = gridOf(this.scene);
-        return t ? this.floorAt(t.x + (t.width || 1) * grid / 2, t.y + (t.height || 1) * grid / 2) : undefined;
+        return this.floorOfToken(this.activeRunner());
     }
     hover(event) {
         const marker = this.element?.[0]?.querySelector(".cprnet-netview-hover");
         const p = this.scenePoint(event);
         if (!marker || !p)
             return;
-        const overToken = !!this.tokenAt(p.x, p.y);
+        const over = this.tokenAt(p.x, p.y), runner = this.activeRunner();
         const stage = this.element?.[0]?.querySelector(".cprnet-netview-stage");
         if (stage)
-            stage.style.cursor = overToken || this.tokenId ? "pointer" : "default";
-        const floor = this.tokenId && !overToken ? this.floorAt(p.x, p.y) : undefined;
+            stage.style.cursor = (over && this.canControl(over)) || (!over && runner) ? "pointer" : "default";
+        const floor = runner && !over ? this.floorAt(p.x, p.y) : undefined;
         marker.hidden = !floor;
         if (floor)
             Object.assign(marker.style, { left: `${floor.bounds.x}px`, top: `${floor.bounds.y}px`, width: `${floor.bounds.width}px`, height: `${floor.bounds.height}px` });
     }
+    /** the active Netrunner goes to a floor */
     async moveTo(floor) {
-        if (!this.tokenId)
-            return;
-        const token = this.token;
+        const token = this.activeRunner();
         if (!token)
-            throw Error("Your Netrunner is no longer in this architecture. Jack In again.");
-        if (!token.isOwner)
-            throw Error("You do not own this Netrunner.");
-        if (!floor || floor.id === this.currentFloor()?.id)
             return;
+        if (!token.isOwner)
+            throw Error(`You do not own ${token.name}.`);
+        const current = this.floorOfToken(token);
+        if (!floor || floor.id === current?.id)
+            return;
+        // Superglue: no going deeper while it holds (the GM may go on anyway)
+        const glue = glueOf(token);
+        if (glue && current && floorDepth(this.scene, floor) > floorDepth(this.scene, current)) {
+            if (!game.user?.isGM)
+                return void ui.notifications.warn(`${token.name} is held by Superglue (${glue.rounds} round${glue.rounds === 1 ? "" : "s"} left) and can't go deeper.`);
+            if (!await Dialog.confirm({ title: "Superglue", content: `<p>${esc(token.name)} is held by Superglue (${glue.rounds} round(s) left).</p><p>Move deeper anyway?</p>`, defaultYes: false }))
+                return;
+        }
         // players: a Password has to be cracked (Backdoor), Black ICE slid past (Slide), before going further
         const grid = gridOf(this.scene), w = (token.width || 1) * grid / 2, h = (token.height || 1) * grid / 2;
         const block = game.user?.isGM ? undefined : pathBlock(this.scene, token, { x: token.x + w, y: token.y + h }, centerOf(floor.bounds));
@@ -1112,11 +1341,20 @@ class NetView extends Application {
         const block = floorBlockOn(this.scene, floor, token);
         return block ? blockMessage(block) : "";
     }
+    /** left-click: a token becomes active (if this user may act with it) – a floor: the active Netrunner goes there.
+     *  An active Black ICE / Demon is never moved by a click (GM: right-click the floor → "Move … here"). */
     async clickAt(event) {
         const p = this.scenePoint(event);
-        if (!p || !this.tokenId || this.tokenAt(p.x, p.y))
-            return; // clicking a token selects nothing and moves nobody
-        await this.moveTo(this.floorAt(p.x, p.y));
+        if (!p)
+            return;
+        const token = this.tokenAt(p.x, p.y);
+        if (token) {
+            if (this.canControl(token))
+                this.setActive(token.id);
+            return;
+        }
+        if (this.activeRunner())
+            await this.moveTo(this.floorAt(p.x, p.y));
     }
     /** topmost visible token / tile under a scene point */
     tokenAt(x, y) {
@@ -1166,8 +1404,9 @@ class NetView extends Application {
         const menu = document.createElement("div");
         menu.className = "cprnet-netview-menu";
         const html = (item, i) => item.separator ? `<hr>`
+            : item.section ? `<span class="cprnet-netview-menu-section">${esc(item.label)}</span>`
             : item.text ? `<span class="cprnet-netview-menu-cell" title="${esc(item.title ?? "")}">${esc(item.label)}${item.sub ? `<small>${esc(item.sub)}</small>` : ""}</span>`
-                : `<button type="button" data-item="${i}" class="${item.active ? "active" : ""}" title="${esc(item.title ?? "")}" aria-label="${esc(item.title || item.label)}">${!item.label ? `<i class="fas ${item.icon}"></i>` : item.iconAfter ? `${esc(item.label)} <i class="fas ${item.icon}"></i>` : `<i class="fas ${item.icon}"></i> ${esc(item.label)}`}</button>`;
+                : `<button type="button" data-item="${i}" class="${item.active ? "active" : ""}${item.disabled ? " is-disabled" : ""}"${item.disabled ? " disabled" : ""} title="${esc(item.title ?? "")}" aria-label="${esc(item.title || item.label)}">${!item.label ? `<i class="fas ${item.icon}"></i>` : item.iconAfter ? `${esc(item.label)} <i class="fas ${item.icon}"></i>` : `<i class="fas ${item.icon}"></i> ${esc(item.label)}`}</button>`;
         // items sharing a "row" key sit side by side in one line
         // consecutive "matrix…" rows share one grid, so their columns line up
         let content = "", inMatrix = false;
@@ -1223,26 +1462,6 @@ class NetView extends Application {
     revealItem(doc) {
         return { label: doc.hidden ? "Reveal for players" : "Hide from players", icon: doc.hidden ? "fa-eye" : "fa-eye-slash", run: () => doc.update({ hidden: !doc.hidden }) };
     }
-    iceMenu(event, token, report) {
-        const inCombat = !!iceCombatant(token);
-        this.showMenu(event, token.name, [
-            { label: "", icon: "fa-arrow-left", title: "One floor left", row: "move", run: () => moveIceFloor(token, -1) },
-            { label: "", icon: "fa-arrow-right", title: "One floor right", row: "move", run: () => moveIceFloor(token, 1) },
-            { label: "Toggle Combat State", icon: "fa-swords", active: inCombat, title: inCombat ? "In combat – click to remove" : "Not in combat – click to add", run: () => toggleIceCombat(token) },
-            { separator: true, label: "", icon: "" },
-            this.revealItem(token),
-        ], report, token.hidden ? "hidden from players" : "visible to players");
-    }
-    /** the Netrunner this window acts with: the own one, for the GM the one on that floor (or any) */
-    actingRunner(floor) {
-        if (this.token)
-            return this.token;
-        if (!game.user?.isGM)
-            return undefined;
-        const grid = gridOf(this.scene);
-        const runners = Array.from(this.scene?.tokens ?? []).filter(t => flagOf(t, RUN_FLAG));
-        return (floor ? runners.find(t => inside(floor.bounds, t.x + (t.width || 1) * grid / 2, t.y + (t.height || 1) * grid / 2)) : undefined) ?? runners[0];
-    }
     floorOfToken(token) {
         const grid = gridOf(this.scene);
         return token ? this.floorAt(token.x + (token.width || 1) * grid / 2, token.y + (token.height || 1) * grid / 2) : undefined;
@@ -1250,86 +1469,186 @@ class NetView extends Application {
     iceInColumn(floor) {
         return this.scene ? iceOfFloor(this.scene, floor).filter(t => game.user?.isGM || !t.hidden) : [];
     }
-    tileMenu(event, tile, report) {
-        const gm = !!game.user?.isGM;
-        const floor = floorList(this.scene).find(f => f.type === "tile" && f.id === tile.id);
-        const items = [];
-        let title = "Tile", note = "";
-        if (floor) {
-            const info = floorInfo(tile, this.iceInColumn(floor));
-            const kinds = [...info.kinds].map(k => FLOOR_KINDS[k]).join(", ") || "unknown type";
-            title = floor.label.replace(/:.*/, "");
-            note = `${kinds}${info.dv !== null ? ` · DV${info.dv}` : ""}`;
-            const runner = this.actingRunner(floor);
-            const here = runner && this.floorOfToken(runner)?.id === floor.id;
-            if (here) {
-                const ice = this.iceInColumn(floor);
-                for (const action of actionsForKinds(info.kinds, runner?.actor, isStealthed(runner)))
-                    items.push({ label: action.label, icon: action.icon, title: action.hint, run: () => runNetAction(runner, action.id, { label: title, tile, ice }) });
-                if (!items.length)
-                    note += " · no NET Action here";
-            }
-            else if (this.tokenId)
-                items.push({ label: "Move here", icon: "fa-shoe-prints", run: () => this.moveTo(floor) });
-            if (runner && !this.token && here)
-                note += ` · as ${runner.name}`;
-            const block = runner ? this.floorBlock(floor, runner) : "";
-            if (block)
-                note += " · blocked";
-            else if (passageOpen(tile) || (runner && hasPassed(tile, runner.actorId)))
-                note += " · passage open";
-            if (gm)
-                items.push({ separator: true, label: "", icon: "" }, { label: "Floor type / DV …", icon: "fa-sliders", run: () => configureFloor(tile) }, { label: passageOpen(tile) ? "Close passage" : "Open passage", icon: passageOpen(tile) ? "fa-lock" : "fa-lock-open",
-                    title: "Lets every Netrunner go on past this floor without Backdoor / Slide", run: () => togglePassage(tile) });
-        }
-        if (gm)
-            items.push(this.revealItem(tile));
-        this.showMenu(event, title, items.filter((item, i, all) => !(item.separator && (i === 0 || i === all.length - 1))), report, note);
+    /** the floor a token is on – Black ICE / Demons stand above their floor */
+    floorOfAny(t) {
+        if (!t)
+            return undefined;
+        if (!isIce(t))
+            return this.floorOfToken(t);
+        const floors = floorList(this.scene), i = iceFloorIndex(floors, t, gridOf(this.scene));
+        return i >= 0 ? floors[i] : undefined;
     }
-    runnerMenu(event, token, report) {
+    sameFloor(a, b) {
+        const fa = this.floorOfAny(a), fb = this.floorOfAny(b);
+        return !!fa && !!fb && fa.id === fb.id;
+    }
+    /** right-click a token: what the active token can do with it ("Rufus → Wisp") */
+    tokenMenu(event, token, report) {
+        const gm = !!game.user?.isGM;
+        let active = this.active;
+        // nobody active yet: a token the user may act with becomes active right away
+        if (!active && this.canControl(token)) {
+            this.setActive(token.id);
+            active = token;
+        }
+        if (!active) {
+            if (gm)
+                return this.showMenu(event, token.name, [...(isRunnerToken(token) ? [this.combatItem(token)] : []), this.revealItem(token)], report, "No active token – left-click a token first");
+            return this.showMenu(event, token.name, [{ label: "Left-click your Netrunner first", icon: "fa-hand-pointer", disabled: true }], report);
+        }
+        if (active.id === token.id)
+            return isIce(token) ? this.iceSelfMenu(event, token, report) : this.runnerSelfMenu(event, token, report);
+        if (isRunnerToken(active) && isIce(token))
+            return this.runnerIceMenu(event, active, token, report);
+        if (isRunnerToken(active) && isRunnerToken(token))
+            return this.runnerRunnerMenu(event, active, token, report);
+        if (isIce(active) && isRunnerToken(token))
+            return this.iceRunnerMenu(event, active, token, report);
+        const items = [{ label: `${active.name} can't act against ${token.name}`, icon: "fa-ban", disabled: true }];
+        if (gm)
+            items.push({ separator: true, label: "", icon: "" }, this.revealItem(token));
+        this.showMenu(event, `${active.name} → ${token.name}`, items, report);
+    }
+    /** the active Netrunner on itself: what it can do on its floor, Interface abilities, Jack Out */
+    runnerSelfMenu(event, token, report) {
+        const gm = !!game.user?.isGM;
         const floor = this.floorOfToken(token);
         const label = floor?.label.replace(/:.*/, "") ?? "NET";
         const tile = floor?.type === "tile" ? this.scene.tiles.get(floor.id) : undefined;
         const ice = floor ? this.iceInColumn(floor) : [];
         const items = [];
-        // GM: the Black ICE / Demons above this floor act against the Netrunner
-        // as a matrix: one line per ICE, one column per stat; the column heads keep the meaning ("lying in wait" …)
-        if (game.user?.isGM && ice.length) {
-            const split = (text) => { const [stat, ...rest] = text.split(" – "); return { stat: stat, meaning: rest.join(" – ") }; };
-            // Going Quiet: a stealthed Netrunner is not met with SPD (lying in wait) – Watchers can search instead
-            const stealthed = isStealthed(token);
-            const actions = ICE_ACTIONS.filter(a => a.stealth ? stealthed : !(stealthed && a.stat === "spd"));
-            items.push({ label: "", icon: "", text: true, row: "matrix:head" }, ...actions.map(a => ({ label: split(a.label).stat, sub: split(a.label).meaning, icon: "", text: true, title: a.hint, row: "matrix:head" })));
-            for (const t of ice) {
-                items.push({ label: t.name, icon: "", text: true, title: t.name, row: `matrix:${t.id}` });
-                for (const a of actions) {
-                    const demon = String(t.actor?.type) === "demon";
-                    if ((demon && !a.demon) || (!demon && a.only === "demon")) {
-                        items.push({ label: "", icon: "", text: true, row: `matrix:${t.id}` });
-                        continue;
-                    }
-                    items.push({ label: split(a.label).stat, icon: a.icon, title: `${t.name}: ${a.label} – ${a.hint}`, row: `matrix:${t.id}`, run: () => startIceAction(t, token, a.stat, label) });
-                }
-            }
-            items.push({ separator: true, label: "", icon: "" });
+        let note = label;
+        if (tile) {
+            const info = floorInfo(tile, ice);
+            note += ` · ${[...info.kinds].filter(k => k !== "empty").map(k => FLOOR_KINDS[k]).join(", ") || "no content"}${info.dv !== null ? ` · DV${info.dv}` : ""}`;
+            // floor actions only – everything against Black ICE / Demons: right-click them
+            for (const action of actionsForKinds(info.kinds, token.actor, isStealthed(token)).filter(a => ["backdoor", "eyedee", "control"].includes(a.id)))
+                items.push({ label: action.label, icon: action.icon, title: action.hint, run: () => runNetAction(token, action.id, { label, tile, ice }) });
         }
         items.push(...RUNNER_ACTIONS.map(action => ({ label: action.label, icon: action.icon, title: action.hint, run: () => runNetAction(token, action.id, { label, tile, ice }) })));
         // Going Quiet – GM: set / end the stealth by hand (e.g. an alarm in meat space)
-        if (game.user?.isGM && goingQuiet()) {
+        if (gm && goingQuiet()) {
             const state = stealthOf(token);
             items.push({ separator: true, label: "", icon: "" }, state === "active"
                 ? { label: "Break stealth", icon: "fa-eye", title: "Stealth ends – every Watcher knows about the Netrunner", run: () => setStealth(token, "broken") }
                 : { label: "Set stealthed", icon: "fa-user-secret", title: "The Netrunner counts as stealthed (e.g. after a successful Quiet Jack In rolled at the table)", run: () => setStealth(token, "active") });
         }
-        if (token.id === this.tokenId)
-            items.push({ separator: true, label: "", icon: "" }, { label: "Jack Out", icon: "fa-plug-circle-xmark", run: () => this.jackOut() });
-        this.showMenu(event, token.name, items, report);
+        if (gm || token.isOwner)
+            items.push({ separator: true, label: "", icon: "" }, { label: "Jack Out", icon: "fa-plug-circle-xmark", run: () => this.jackOut(token) },
+                { label: "Unsafe Jack Out", icon: "fa-plug-circle-exclamation", title: "Out at once, without a NET Action (also while Superglued) – the Netrunner suffers the effect of every rezzed Black ICE it met", run: () => this.jackOut(token, true) });
+        if (gm)
+            items.push(this.combatItem(token), this.revealItem(token));
+        this.showMenu(event, `${token.name}`, items, report, note);
     }
-    async jackOut() {
+    /** GM: like Foundry's "Toggle Combat State" – this token (Netrunner or ICE) in / out of the current encounter */
+    combatItem(token) {
+        const inCombat = !!iceCombatant(token);
+        return { label: "Toggle Combat State", icon: "fa-swords", active: inCombat, title: `${token.name}: ${inCombat ? "in combat – click to remove" : "not in combat – click to add"}`, run: () => toggleIceCombat(token) };
+    }
+    /** GM: the active Black ICE / Demon on itself */
+    iceSelfMenu(event, token, report) {
+        this.showMenu(event, token.name, [
+            { label: "", icon: "fa-arrow-left", title: "One floor left", row: "move", run: () => moveIceFloor(token, -1) },
+            { label: "", icon: "fa-arrow-right", title: "One floor right", row: "move", run: () => moveIceFloor(token, 1) },
+            this.combatItem(token),
+            { separator: true, label: "", icon: "" },
+            this.revealItem(token),
+        ], report, `${token.hidden ? "hidden from players" : "visible to players"} · right-click a floor: move it there`);
+    }
+    /** the active Netrunner against a Black ICE / Demon: attacks on exactly this one, Slide, the Speed reaction */
+    runnerIceMenu(event, runner, iceToken, report) {
+        const gm = !!game.user?.isGM;
+        const floor = this.floorOfToken(runner);
+        const label = floor?.label.replace(/:.*/, "") ?? "NET";
+        const tile = floor?.type === "tile" ? this.scene.tiles.get(floor.id) : undefined;
+        const all = floor ? this.iceInColumn(floor) : [];
+        const here = this.sameFloor(runner, iceToken);
+        const why = here ? "" : `${iceToken.name} is not on ${runner.name}'s floor`;
+        const demon = String(iceToken.actor?.type) === "demon", stealthed = isStealthed(runner);
+        const kinds = new Set([demon ? "demon" : "ice"]);
+        const items = [];
+        for (const action of actionsForKinds(kinds, runner.actor, stealthed).filter(a => a.id !== "pathfinder")) {
+            // attacks: only this target · Slide / Speed / Evade Detection: every ICE of the floor takes part
+            const target = ["zap", "sword", "banhammer"].includes(action.id) ? [iceToken] : all;
+            const reaction = ["speed", "stealth"].includes(action.id);
+            items.push({ label: action.label + (reaction ? " (reaction)" : ""), icon: action.icon, title: why || action.hint, disabled: !here,
+                run: () => runNetAction(runner, action.id, { label, tile, ice: target }) });
+        }
+        if (gm)
+            items.push({ separator: true, label: "", icon: "" }, this.revealItem(iceToken));
+        this.showMenu(event, `${runner.name} → ${iceToken.name}`, items, report, why || (demon ? "Demon" : "Black ICE"));
+    }
+    /** GM: the active Black ICE / Demon against a Netrunner on its floor */
+    iceRunnerMenu(event, iceToken, runner, report) {
+        const floor = this.floorOfToken(runner);
+        const label = floor?.label.replace(/:.*/, "") ?? "NET";
+        const here = this.sameFloor(iceToken, runner);
+        const why = here ? "" : `${runner.name} is not on ${iceToken.name}'s floor`;
+        const stealthed = isStealthed(runner), demon = String(iceToken.actor?.type) === "demon";
+        // Going Quiet: a stealthed Netrunner is not met with SPD (lying in wait) – Watchers can search instead
+        const actions = ICE_ACTIONS.filter(a => a.stealth ? stealthed : !(stealthed && a.stat === "spd")).filter(a => !((demon && !a.demon) || (!demon && a.only === "demon")));
+        const items = actions.map(a => ({ label: a.label, icon: a.icon, title: why || a.hint, disabled: !here, run: () => startIceAction(iceToken, runner, a.stat, label) }));
+        if (!items.length)
+            items.push({ label: "Nothing to do", icon: "fa-ban", disabled: true });
+        items.push({ separator: true, label: "", icon: "" }, this.combatItem(runner), this.revealItem(runner));
+        this.showMenu(event, `${iceToken.name} → ${runner.name}`, items, report, why || (stealthed ? `${runner.name} is stealthed` : ""));
+    }
+    /** the active Netrunner against another Netrunner: Zap, Anti-Personnel programs, attacks on its programs */
+    runnerRunnerMenu(event, runner, target, report) {
+        const here = this.sameFloor(runner, target);
+        const floor = this.floorOfToken(runner);
+        const label = floor?.label.replace(/:.*/, "") ?? "NET";
+        const hidden = !game.user?.isGM && isStealthed(target);
+        const why = !here ? `${target.name} is not on ${runner.name}'s floor` : hidden ? `${target.name} is stealthed` : "";
+        const items = runnerAttackItems(runner, target, label, why);
+        if (game.user?.isGM)
+            items.push({ separator: true, label: "", icon: "" }, this.combatItem(target), this.revealItem(target));
+        this.showMenu(event, `${runner.name} → ${target.name}`, items, report, why || "Netrunner");
+    }
+    /** GM: right-click a floor – move the active Black ICE / Demon here, floor type / DV, passage, reveal */
+    floorMenu(event, floor, tile, report) {
+        const items = [], active = this.active;
+        const tileFloor = floor?.type === "tile" ? this.scene.tiles.get(floor.id) : undefined;
+        const theTile = tileFloor ?? tile;
+        let title = floor ? floor.label.replace(/:.*/, "") : "Tile", note = "";
+        if (active && isIce(active) && floor) {
+            const already = this.floorOfAny(active)?.id === floor.id;
+            items.push({ label: `Move ${active.name} here`, icon: "fa-arrows-up-down-left-right", disabled: already, title: already ? `${active.name} is already on this floor` : `${active.name} goes to this floor (arranged above it)`, run: () => moveIceToFloor(active, floor) });
+            items.push({ separator: true, label: "", icon: "" });
+        }
+        if (tileFloor) {
+            const info = floorInfo(tileFloor, this.iceInColumn(floor));
+            note = `${[...info.kinds].map(k => FLOOR_KINDS[k]).join(", ") || "unknown type"}${info.dv !== null ? ` · DV${info.dv}` : ""}${passageOpen(tileFloor) ? " · passage open" : ""}`;
+            items.push({ label: "Floor type / DV …", icon: "fa-sliders", run: () => configureFloor(tileFloor) }, { label: passageOpen(tileFloor) ? "Close passage" : "Open passage", icon: passageOpen(tileFloor) ? "fa-lock" : "fa-lock-open",
+                title: "Lets every Netrunner go on past this floor without Backdoor / Slide", run: () => togglePassage(tileFloor) });
+        }
+        if (theTile)
+            items.push(this.revealItem(theTile));
+        this.showMenu(event, title, items, report, note);
+    }
+    async jackOut(token, unsafe = false) {
+        if (!token)
+            return;
+        if (unsafe) {
+            const met = iceMetOnCards(token);
+            const ok = await Dialog.confirm({ title: "Unsafe Jack Out", defaultYes: false,
+                content: `<p>Jack ${esc(token.name)} out <strong>unsafely</strong>?</p><p>${met.length ? `The Netrunner suffers the effect of every rezzed Black ICE it met: ${met.map(t => esc(t.name)).join(", ")}.` : "No rezzed Black ICE met – no effects."}</p>` });
+            if (!ok)
+                return;
+        }
+        // Superglue: no safe Jack Out while it holds (the GM may go on anyway) – an unsafe one is always possible
+        const glue = unsafe ? undefined : glueOf(token);
+        if (glue) {
+            if (!game.user?.isGM)
+                return void ui.notifications.warn(`${token.name} is held by Superglue (${glue.rounds} round${glue.rounds === 1 ? "" : "s"} left) – no safe Jack Out.`);
+            if (!await Dialog.confirm({ title: "Superglue", content: `<p>${esc(token.name)} is held by Superglue (${glue.rounds} round(s) left) – no safe Jack Out.</p><p>Jack Out anyway?</p>`, defaultYes: false }))
+                return;
+        }
         try {
-            await sendRequest("jack-out", this.ap.uuid, { token: this.tokenId });
-            ui.notifications.info("Jacked out of the NET.");
-            await this.close();
+            await sendRequest("jack-out", this.ap.uuid, { token: token.id, ...(unsafe ? { unsafe: true, reason: "Unsafe Jack Out" } : {}) });
+            ui.notifications.info(`${token.name} jacked out of the NET${unsafe ? " (unsafe)" : ""}.`);
+            if (token.id === this.tokenId)
+                await this.close();
         }
         catch (error) {
             ui.notifications.error(error.message);
@@ -1339,6 +1658,17 @@ class NetView extends Application {
         views.delete(this.tokenId || `view-${this.data.scene}`);
         return super.close(options);
     }
+}
+/** a Netrunner token in a NET scene */
+const isRunnerToken = (t) => !!flagOf(t, RUN_FLAG);
+const tokenImg = (t) => String(t?.texture?.src && !String(t.texture.src).includes("*") ? t.texture.src : t?.actor?.img ?? "icons/svg/mystery-man.svg");
+/** how deep a floor lies in the architecture (number of floors before it) */
+function floorDepth(scene, floor) {
+    const tree = floorTree(scene);
+    let depth = 0;
+    for (let id = floor?.id; id && tree.get(id)?.parent && depth < 500; id = tree.get(id).parent)
+        depth++;
+    return depth;
 }
 function drawingSVG(d) {
     const w = Number(d.shape?.width) || 0, h = Number(d.shape?.height) || 0;
@@ -1387,7 +1717,7 @@ function openForMe(ap) {
 }
 const redrawScene = (sceneId) => { for (const view of views.values())
     if (!sceneId || view.data.scene === sceneId)
-        view.draw(); };
+        view.scheduleDraw(); };
 /** Access Point settings changed (e.g. window background) → open windows follow */
 const refreshAccessPoint = (doc) => {
     for (const view of views.values())
@@ -1422,6 +1752,9 @@ async function jackIn(ap) {
     if (!tokenId)
         throw Error("Jack In failed.");
     openView(ap.document, tokenId);
+    // Jack In is a NET Action – quietly it takes two
+    const netToken = game.scenes?.get(accessPointData(ap.document)?.scene)?.tokens?.get(tokenId);
+    await spendNetActions(netToken, stealth ? 2 : 1);
     if (stealth)
         await quietJackIn(ap.document, tokenId);
 }
@@ -1576,6 +1909,14 @@ function decorateHUD(hud, html) {
     place();
 }
 export function registerAccessPoints() {
+    // DeckKRASH (GM button on the card): the target is jacked out at once – no Superglue check, it is an unsafe Jack Out
+    setForceOut(async (token) => {
+        const ap = flagOf(token, `${RUN_FLAG}.accessPoint`);
+        if (!ap)
+            throw Error(`${token.name} has no Access Point to jack out through.`);
+        await sendRequest("jack-out", ap, { token: token.id, unsafe: true, reason: "DeckKRASH" });
+        ui.notifications.info(`${token.name} was forced out of the NET (DeckKRASH).`);
+    });
     // revealing / hiding a floor also reveals / hides the arrows leading into it – with branches the whole way
     // (down arrows + row arrows); an arrow shared by several branches stays visible while one of them is revealed.
     // Works for the window's right-click and Foundry's own tile HUD.
@@ -1615,6 +1956,41 @@ export function registerAccessPoints() {
         hint: "When a Netrunner (not stealthed) enters the floor of Black ICE it has not met yet, a chat card is posted: the GM rolls the Black ICE's SPD, then the Netrunner makes the Speed check.",
         scope: "world", config: true, type: Boolean, default: true,
     });
+    // NET Actions counter: show the new value in the Netrunner's window(s)
+    Hooks.on("updateToken", (doc, changes) => {
+        if (foundry.utils.getProperty(changes ?? {}, `flags.${MODULE}.${ACTIONS_FLAG}`) === undefined && foundry.utils.getProperty(changes ?? {}, `flags.${MODULE}.${PENALTY_FLAG}`) === undefined)
+            return;
+        for (const view of views.values()) {
+            if (view.activeId !== doc.id) continue;
+            const box = view.element?.[0]?.querySelector(".cprnet-netview-actions");
+            const value = box?.querySelector("[data-net-act-value]");
+            if (value) value.innerHTML = netActionsHTML(doc);
+            const max = netActionsLimit(doc);
+            box?.classList.toggle("is-over", !!max && netActionsOf(doc) > max);
+        }
+    });
+    // a new round: every Netrunner's NET Actions counter goes back to 0, a Vrizzbolt hit lowers the NET Actions of
+    // this (the next) turn, Superglue holds one round less (done by one GM)
+    Hooks.on("updateCombat", (combat, changes) => {
+        if (!("round" in (changes ?? {})) || !game.user?.isGM || primaryGM()?.id !== game.user?.id)
+            return;
+        for (const scene of netScenes()) {
+            const updates = [];
+            for (const t of scene.tokens) {
+                const u = {}, penalty = netActionsPenaltyOf(t), glue = glueOf(t);
+                if (netActionsOf(t) > 0)
+                    u[`flags.${MODULE}.${ACTIONS_FLAG}`] = 0;
+                if (penalty.active || penalty.pending)
+                    u[`flags.${MODULE}.${PENALTY_FLAG}`] = { active: Number(penalty.pending ?? 0) || 0, pending: 0 };
+                if (glue)
+                    Object.assign(u, glue.rounds > 1 ? { [`flags.${MODULE}.glue.rounds`]: glue.rounds - 1 } : { [`flags.${MODULE}.-=glue`]: null });
+                if (Object.keys(u).length)
+                    updates.push({ _id: t.id, ...u });
+            }
+            if (updates.length)
+                void scene.updateEmbeddedDocuments("Token", updates).catch((error) => console.error(MODULE, "NET round", error));
+        }
+    });
     Hooks.on("updateToken", (doc, changes) => {
         if (!("x" in (changes ?? {})) && !("y" in (changes ?? {})))
             return;
@@ -1641,7 +2017,13 @@ export function registerAccessPoints() {
         Hooks.on(hook, (doc) => { redrawScene(doc?.parent?.id ?? doc?.id); if (hook === "updateToken")
             refreshAccessPoint(doc); });
     Hooks.on("deleteToken", (doc) => { const view = views.get(doc.id); if (view)
-        void view.close(); });
+        void view.close();
+        // a window whose active token left the architecture: nobody is active any more
+        for (const v of views.values())
+            if (v.activeId === doc.id) {
+                v.activeId = "";
+                v.renderFooter();
+            } });
     // the Netrunner's own token is highlighted only in its own window – nothing else is drawn twice
     Hooks.once("ready", () => {
         game.socket.on(CHANNEL, (packet) => {

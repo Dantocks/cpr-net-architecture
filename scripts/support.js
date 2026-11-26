@@ -27,12 +27,36 @@ export function nativeDiceHandlerURL() {
 }
 let api;
 const hiddenDice = new WeakSet();
+/** With Pneuma's Combat Tools active, their own dice helpers are used (same module instance, so they share its
+ *  hidden-dice list and its libWrapper registration) – this module then never touches the dice handler itself,
+ *  so libWrapper sees no conflict. */
+let ctApi;
+async function combatToolsDice() {
+    if (!game.modules?.get("pneuma-combattools")?.active) return null;
+    ctApi ??= (async () => {
+        try {
+            const url = foundry.utils.getRoute("modules/pneuma-combattools/scripts/native-combat.js");
+            const m = await import(new URL(url, globalThis.location?.href).href);
+            return typeof m.rollHidden === "function" && typeof m.showSavedDice === "function" ? m : null;
+        } catch (error) {
+            console.warn("cpr-net-architecture | Combat Tools dice helpers not available, using own ones", error);
+            return null;
+        }
+    })();
+    return ctApi;
+}
 /** the system's Dice class; its 3D dice are skipped for rolls marked hidden (they are shown later with the card) */
 async function nativeAPI() {
     api ??= (async () => {
         const Dice = (await import(nativeDiceHandlerURL())).default;
-        const original = Dice.handle3dDice;
-        if (typeof original === "function" && !original.cprNetArch) {
+        if (globalThis.libWrapper?.register) {
+            // through libWrapper, so other modules wrapping the dice handler are not overridden
+            globalThis.cprNetArchNative = { Dice };
+            globalThis.libWrapper.register(MODULE, "cprNetArchNative.Dice.handle3dDice", function (wrapped, roll, mode, ...rest) {
+                return hiddenDice.has(roll) ? Promise.resolve() : wrapped(roll, mode, ...rest);
+            }, "MIXED");
+        } else if (typeof Dice.handle3dDice === "function" && !Dice.handle3dDice.cprNetArch) {
+            const original = Dice.handle3dDice;
             const wrapped = function (roll, mode, ...rest) {
                 return hiddenDice.has(roll) ? Promise.resolve() : original.call(this, roll, mode, ...rest);
             };
@@ -45,6 +69,8 @@ async function nativeAPI() {
 }
 /** roll a CPR roll without showing its dice now (only this roll, never the global roll mode) */
 export async function rollHidden(roll) {
+    const ct = await combatToolsDice();
+    if (ct) return ct.rollHidden(roll);
     await nativeAPI();
     for (const key of ["_roll", "_critRoll"]) {
         let value = roll[key];
@@ -60,6 +86,8 @@ export function diceJSON(roll) {
 }
 /** show dice that were rolled hidden (Dice So Nice: as the user who rolled) */
 export async function showSavedDice(dice, mode, userId) {
+    const ct = await combatToolsDice();
+    if (ct) return ct.showSavedDice(dice, mode, userId);
     const { Dice } = await nativeAPI();
     const user = userId ? game.users?.get(userId) : undefined;
     await Promise.all(dice.map(async (json) => {
@@ -89,4 +117,48 @@ export function attackHeading(title, tag = "h3") {
 // ---------- status effects (e.g. "Unconscious" after Black ICE damage) ----------
 export async function applyCombatStatus(actor, id) {
     await actor?.toggleStatusEffect?.(id, { active: true });
+}
+
+// ---------- NET Actions counter (per Netrunner token in the NET scene) ----------
+export const ACTIONS_FLAG = "netActions";
+/** NET Actions per Turn by Interface rank (Core p. 199): 1–3 → 2, 4–6 → 3, 7–9 → 4, 10 → 5 (0 = no Interface) */
+export function netActionsMax(actor) {
+    const roles = actor?.itemTypes?.role ?? [];
+    const role = roles.find((r) => r.id === actor?.system?.roleInfo?.activeNetRole) ?? roles.find((r) => /netrunner/i.test(String(r.name)));
+    const rank = Number(role?.system?.rank ?? 0) || 0;
+    return rank <= 0 ? 0 : rank <= 3 ? 2 : rank <= 6 ? 3 : rank <= 9 ? 4 : 5;
+}
+/** Vrizzbolt: NET Actions lowered on the Netrunner's next turn – { pending: hit this round, active: this round } */
+export const PENALTY_FLAG = "netActionsPenalty";
+export const netActionsPenaltyOf = (doc) => foundry.utils.getProperty(doc, `flags.${MODULE}.${PENALTY_FLAG}`) ?? {};
+/** NET Actions this Netrunner has this round: by Interface rank, minus an active Vrizzbolt penalty (minimum 2) */
+export function netActionsLimit(doc) {
+    const base = netActionsMax(doc?.actor);
+    const penalty = Number(netActionsPenaltyOf(doc).active ?? 0) || 0;
+    return base && penalty ? Math.max(2, base - penalty) : base;
+}
+export const netActionsOf = (doc) => Math.max(0, Number(foundry.utils.getProperty(doc, `flags.${MODULE}.${ACTIONS_FLAG}`) ?? 0) || 0);
+/** before a NET Action: enough left this round? Only while a combat is running (outside one there are no turns).
+ *  Player: a message, the action does not happen. GM: the same, with the option to go on anyway. */
+export async function canSpendNetActions(runner, cost, label) {
+    const max = netActionsLimit(runner), used = netActionsOf(runner);
+    if (!max || used + cost <= max || !game.combats?.some((c) => c.started))
+        return true;
+    const text = `${runner.name} has no NET Actions left this round (${used}/${max})${cost > 1 ? ` – ${label} needs ${cost}` : ""}.`;
+    if (!game.user?.isGM) {
+        ui.notifications.warn(text);
+        return false;
+    }
+    return Dialog.confirm({
+        title: "NET Actions used up",
+        content: `<p>${foundry.utils.escapeHTML?.(text) ?? text}</p><p>Use <strong>${foundry.utils.escapeHTML?.(label) ?? label}</strong> anyway?</p>`,
+        yes: () => true, no: () => false, defaultYes: false,
+        options: { classes: ["dialog", "cprnet-netactions-dialog"] },
+    });
+}
+/** after a NET Action: count it on the Netrunner's token */
+export async function spendNetActions(runner, cost) {
+    if (!runner || !cost) return;
+    try { await runner.update({ [`flags.${MODULE}.${ACTIONS_FLAG}`]: netActionsOf(runner) + cost }); }
+    catch (error) { console.warn(MODULE, "NET Actions counter", error); }
 }

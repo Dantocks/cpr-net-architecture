@@ -1,3 +1,4 @@
+/* NET Architecture v1.5.12 */
 :root {
   --cprnet-panel-background: rgba(12, 14, 18, 0.78);
   --cprnet-panel-color: #eeeeee;
@@ -381,10 +382,12 @@
 .cprnet-netview .cprnet-netview-stealth-badge { position: absolute; right: -6%; top: -6%; width: 38%; aspect-ratio: 1; display: grid; place-items: center; border-radius: 50%;
   background: #071820; border: 3px solid #64f1df; color: #64f1df; font-size: 22px; box-shadow: 0 0 10px #64f1df; pointer-events: none; z-index: 1; }
 .cprnet-netview .cprnet-netview-token.is-stealth-pending .cprnet-netview-stealth-badge { border-color: #ffd166; color: #ffd166; box-shadow: 0 0 10px #ffd166; }
-.cprnet-netview.is-stealthed .cprnet-netview-stage { box-shadow: inset 0 0 0 3px #64f1df, inset 0 0 50px #64f1df40; }
+/* the stealth frame is an overlay above the map, so a panned map never covers it (z-index below the menus) */
+.cprnet-netview:is(.is-stealthed, .is-stealth-broken) .cprnet-netview-stage::before { content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 4; }
+.cprnet-netview.is-stealthed .cprnet-netview-stage::before { box-shadow: inset 0 0 0 3px #64f1df, inset 0 0 50px #64f1df40; }
 .cprnet-netview.is-stealthed .cprnet-netview-stage::after { content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 5;
   background: repeating-linear-gradient(0deg, #64f1df0d 0 2px, transparent 2px 5px); animation: cprnet-stealth-scan 8s linear infinite; }
-.cprnet-netview.is-stealth-broken .cprnet-netview-stage { box-shadow: inset 0 0 0 3px #ff4d4d, inset 0 0 40px #ff4d4d33; }
+.cprnet-netview.is-stealth-broken .cprnet-netview-stage::before { box-shadow: inset 0 0 0 3px #ff4d4d, inset 0 0 40px #ff4d4d33; }
 .cprnet-netview .cprnet-netview-stealth { flex: none; display: inline-flex; align-items: center; gap: 5px; padding: 1px 9px; border: 1px solid #64f1df; border-radius: 2px;
   font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: 12px; line-height: 20px; color: #071820; background: #64f1df; }
 .cprnet-netview .cprnet-netview-stealth[hidden] { display: none; }
@@ -407,3 +410,50 @@
 #token-hud.cpr-net-foreign-ap .col.middle,
 #token-hud.cpr-net-foreign-ap .status-effects,
 #token-hud.cpr-net-foreign-ap .col.right > .control-icon:not(.cprnet-netrun-icon) { display: none; }
+
+/* NET Actions counter in the Netrunner's NET window */
+.cprnet-netview .cprnet-netview-actions { flex: none; display: inline-flex; align-items: center; gap: 3px; padding: 0 4px 0 8px; border: 1px solid #487a82; border-radius: 3px; font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: #9fd8cf; white-space: nowrap; }
+.cprnet-netview .cprnet-netview-actions [data-net-act-value] { min-width: 28px; text-align: center; font-size: 15px; color: #e8fbf8; }
+.cprnet-netview .cprnet-netview-actions [data-net-act-value] small { font-size: 11px; opacity: .7; }
+.cprnet-netview .cprnet-netview-footer .cprnet-netview-actions button { width: 22px; padding: 0; line-height: 20px; }
+.cprnet-netview .cprnet-netview-actions.is-over { border-color: #ff4d4d; }
+.cprnet-netview .cprnet-netview-actions.is-over [data-net-act-value] { color: #ff6b6b; }
+
+/* ---------- v1.5.0: active token, keyboard focus, menus ---------- */
+/* drawn in scene units – the view scales it like the token */
+.cprnet-netview .cprnet-netview-token.is-active { outline: 8px solid #f2c14e; outline-offset: 6px; border-radius: 8px; box-shadow: 0 0 40px 12px #f2c14e99; z-index: 3; }
+.cprnet-netview .cprnet-netview-token.is-active::after { content: ""; position: absolute; inset: -22px; border-radius: 12px; border: 4px solid #f2c14e; animation: cprnet-active-pulse 1.6s ease-in-out infinite; pointer-events: none; }
+@keyframes cprnet-active-pulse { 0%, 100% { opacity: .2; } 50% { opacity: 1; } }
+.cprnet-netview .cprnet-netview-token.is-controllable { cursor: pointer; }
+/* the footer chip: who acts in this window */
+.cprnet-netview .cprnet-netview-active { flex: none; display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px 1px 2px; border: 1px solid #f2c14e; border-radius: 3px; color: #ffe39a; font-weight: 700; white-space: nowrap; max-width: 180px; }
+.cprnet-netview .cprnet-netview-active img { width: 22px; height: 22px; object-fit: cover; border: none; border-radius: 2px; }
+.cprnet-netview .cprnet-netview-active > span { display: flex; flex-direction: column; line-height: 1; overflow: hidden; text-overflow: ellipsis; }
+.cprnet-netview .cprnet-netview-active small { font-size: 9px; font-weight: 400; text-transform: uppercase; letter-spacing: .06em; opacity: .7; }
+.cprnet-netview .cprnet-netview-active.is-none { border-color: #487a82; color: #9fd8cf; padding-left: 6px; }
+/* keys belong to the NET view only while it has the focus – shown with a frame and a note */
+.cprnet-netview .cprnet-netview-stage:focus { outline: none; }
+.cprnet-netview .cprnet-netview-stage:focus::after { content: ""; position: absolute; inset: 0; border: 2px solid #f2c14e; pointer-events: none; z-index: 5; }
+.cprnet-netview .cprnet-netview-keys { position: absolute; right: 6px; bottom: 6px; z-index: 6; display: none; padding: 1px 8px; border-radius: 3px; background: #f2c14e; color: #111; font-size: 11px; font-weight: 700; pointer-events: none; }
+.cprnet-netview .cprnet-netview-stage:focus .cprnet-netview-keys { display: block; }
+/* context menu: actions that are not possible right now (with the reason as tooltip) */
+.cprnet-netview .cprnet-netview-menu button.is-disabled, .cprnet-netview .cprnet-netview-menu button:disabled { opacity: .45; cursor: not-allowed; }
+.cprnet-netview .cprnet-netview-menu .cprnet-netview-menu-section { display: block; margin: 4px 0 2px; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; opacity: .7; }
+
+/* v1.5.7 – footer, Concept D: row 1 always the same, row 2 only for the GM */
+.cprnet-netview .cprnet-netview-footer { flex-direction: column; align-items: stretch; flex-wrap: nowrap; gap: 4px; }
+.cprnet-netview .cprnet-netview-row { display: flex; align-items: center; gap: 6px; min-height: 26px; }
+.cprnet-netview .cprnet-netview-spacer { flex: 1; }
+.cprnet-netview .cprnet-netview-footer button:disabled { opacity: .35; cursor: default; }
+.cprnet-netview .cprnet-netview-actions.is-off { opacity: .45; }
+.cprnet-netview .cprnet-netview-status { flex: none; width: 210px; display: inline-flex; }
+.cprnet-netview .cprnet-netview-status .cprnet-netview-stealth { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cprnet-netview .cprnet-netview-nostatus { flex: 1; box-sizing: border-box; padding: 1px 9px; border: 1px dashed #2b5560; border-radius: 2px; color: #4d7680; font-size: 12px; line-height: 20px; }
+.cprnet-netview .cprnet-netview-nostatus[hidden] { display: none; }
+.cprnet-netview .cprnet-netview-footer button.cprnet-netview-icon { width: 28px; padding: 0; }
+.cprnet-netview .cprnet-netview-footer button.cprnet-netview-jackout { border-color: #d9534f; color: #ffd0ce; background: #341616; }
+.cprnet-netview .cprnet-netview-footer button.cprnet-netview-gm { border-color: #9a7bd1; color: #e4d8ff; background: #211a33; }
+.cprnet-netview .cprnet-netview-gmlabel { font-size: 10px; text-transform: uppercase; letter-spacing: .1em; color: #7fa8b0; }
+.cprnet-netview .cprnet-netview-sep { width: 1px; align-self: stretch; margin: 2px 2px; background: #2b5560; }
+.cprnet-netview .cprnet-netview-row.is-gm { height: 26px; min-height: 26px; } /* exactly GM_ROW (26 + 4 gap) – the players' window is lower by that */
+.cprnet-netview .cprnet-netview-menu { z-index: 20; } /* v1.5.12: above the "Keys control the NET" note and the focus frame */

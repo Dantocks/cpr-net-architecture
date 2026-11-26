@@ -9,7 +9,8 @@
 // Black ICE / Demons (GM, right-click the Netrunner): ATK (exchange – the Netrunner evades with Speed or not),
 // SPD (lying in wait – the Netrunner rolls Speed) and PER (the Netrunner rolls Slide).
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { primaryGM } from "./support.js";
+import { primaryGM, canSpendNetActions, spendNetActions } from "./support.js";
+import { applyRvrPatch, decorateRvr, decorateTick, rvrSummaryEntries, rvrUndo, burnTick, TICK_FLAG, applyUnsafePatch, decorateUnsafe, unsafeSummaryRows } from "./runner-combat.js";
 import { diceJSON, nativeCard, nativeDiceHandlerURL, rollHidden, showSavedDice, rollOutcomeClass, attackHeading, applyCombatStatus } from "./support.js";
 const MODULE = "cpr-net-architecture";
 const CHANNEL = "module.cpr-net-architecture";
@@ -171,7 +172,7 @@ function abilityKey(config, wanted) {
     return undefined;
 }
 /** a plain "value + 1d10" native roll card (Black ICE stats, fallback Interface rolls) */
-async function statRoll(title, value, mods = []) {
+export async function statRoll(title, value, mods = []) {
     const m = await cprModules();
     try {
         if (!m?.rolls?.CPRStatRoll)
@@ -221,7 +222,7 @@ function speedBonus(actor) {
 const speedyInRoll = (roll) => (Array.isArray(roll?.mods) ? roll.mods : []).filter((x) => /speedy|gonzalvez/i.test(String(x?.source ?? x?.name ?? "")))
     .reduce((sum, x) => sum + (Number(x?.value) || 0), 0);
 /** Interface ability check of a Netrunner (the system's own roll and dialog) */
-async function runnerRoll(runner, action) {
+export async function runnerRoll(runner, action, extra = []) {
     const actor = runner.actor;
     const deck = (actor?.itemTypes?.cyberdeck ?? []).find((d) => d.system?.equipped === "equipped");
     const netRole = (actor?.itemTypes?.role ?? []).find((r) => r.id === actor.system?.roleInfo?.activeNetRole);
@@ -235,6 +236,9 @@ async function runnerRoll(runner, action) {
         let roll = deck.createRoll(m.rolls.rollTypes.INTERFACEABILITY, actor, { interfaceAbility: key, cyberdeck: deck, netRoleItem: netRole });
         if (!roll)
             return;
+        // Netrunner vs Netrunner: the ATK of the attacking program
+        if (extra.length)
+            roll.addMod(extra);
         // Skunk: Slide −2 per Skunk that hit the Netrunner
         if (action.id === "slide" && skunkPenalty(actor))
             roll.addMod([{ value: skunkPenalty(actor), source: "Skunk" }]);
@@ -265,10 +269,10 @@ async function runnerRoll(runner, action) {
         return { total: Number(roll.resultTotal), html: await nativeCard(roll), dice: diceJSON(roll), roller: game.user.id };
     }
     // this system version has no such Interface ability: Interface rank + 1d10
-    return statRoll(`${action.label} (Interface)`, Number(netRole.system?.rank ?? 0) || 0, action.id === "speed" ? speedBonus(actor) : action.id === "stealth" && eraserRezzed(actor) ? [{ value: 2, source: "Eraser" }] : action.id === "sword" ? [{ value: 1, source: "Sword" }] : action.id === "banhammer" ? [{ value: 1, source: "Banhammer" }] : action.id === "slide" && skunkPenalty(actor) ? [{ value: skunkPenalty(actor), source: "Skunk" }] : []);
+    return statRoll(`${action.label} (Interface)`, Number(netRole.system?.rank ?? 0) || 0, extra.length ? extra : action.id === "speed" ? speedBonus(actor) : action.id === "stealth" && eraserRezzed(actor) ? [{ value: 2, source: "Eraser" }] : action.id === "sword" ? [{ value: 1, source: "Sword" }] : action.id === "banhammer" ? [{ value: 1, source: "Banhammer" }] : action.id === "slide" && skunkPenalty(actor) ? [{ value: skunkPenalty(actor), source: "Skunk" }] : []);
 }
 // ---------- Black ICE / Demon values ----------
-function numberAt(doc, paths) {
+export function numberAt(doc, paths) {
     for (const path of paths) {
         const raw = foundry.utils.getProperty(doc, path);
         const value = typeof raw === "object" && raw !== null ? (raw.value ?? raw.total) : raw;
@@ -290,7 +294,7 @@ function iceValue(actor, stat) {
     return numberAt(actor, names.flatMap(n => [`system.stats.${n}`, `system.${n}`]));
 }
 /** the Black ICE's description (the text below its stats on the sheet) */
-const iceEffect = (actor) => {
+export const iceEffect = (actor) => {
     for (const path of ["system.effect", "system.effect.value", "system.description.value", "system.description", "system.notes"]) {
         const raw = foundry.utils.getProperty(actor, path);
         if (typeof raw !== "string" || !raw.trim())
@@ -320,8 +324,8 @@ async function iceRoll(ice, stat, edit = false) {
 }
 const isMulti = (s) => s.type === "runner-vs-ice" && !!s.rows;
 const sideImg = (token) => String(token?.texture?.src && !String(token.texture.src).includes("*") ? token.texture.src : token?.actor?.img ?? "icons/svg/mystery-man.svg");
-const side = (token) => ({ token: token.id, name: token.name, img: sideImg(token) });
-function section(kind, label, content, classes = "") {
+export const side = (token) => ({ token: token.id, name: token.name, img: sideImg(token) });
+export function section(kind, label, content, classes = "") {
     // Pneuma's pending exchange: centred status, answer buttons in one column below
     if (kind === "pending")
         content = `<div class="rollcard cprnet-pending-exchange">${content}</div>`;
@@ -670,7 +674,7 @@ async function recordPassage(message) {
     }
 }
 /** only these Black ICE pick one of the Netrunner's programs */
-function progKindOf(actor, name = "") {
+export function progKindOf(actor, name = "") {
     const text = `${actor?.name ?? ""} ${name}`.toLowerCase();
     if (/\basp\b|\braven\b/.test(text))
         return "derez";
@@ -680,7 +684,7 @@ function progKindOf(actor, name = "") {
 }
 /** the programs installed on the Netrunner's active cyberdeck – like the "Show Rezzed Programs" macro by
  *  system.isInstalled; narrowed to the equipped deck when its list of installed items can be read */
-function installedPrograms(actor, rezzedOnly = false) {
+export function installedPrograms(actor, rezzedOnly = false) {
     const programs = Array.from(actor?.items ?? []).filter(i => String(i.type) === "program" && (i.system?.isInstalled || i.system?.isInstalledInActor));
     const deck = (actor?.itemTypes?.cyberdeck ?? Array.from(actor?.items ?? []).filter((i) => String(i.type) === "cyberdeck")).find((d) => d.system?.equipped === "equipped");
     const raw = deck?.system?.installedItems;
@@ -694,8 +698,8 @@ function installedPrograms(actor, rezzedOnly = false) {
     }
     return rezzedOnly ? result.filter(p => p.system?.isRezzed) : result;
 }
-const progRezPath = (program) => typeof program?.system?.rez === "object" && program.system.rez !== null ? "system.rez.value" : "system.rez";
-const progRez = (program) => Number(foundry.utils.getProperty(program, progRezPath(program)));
+export const progRezPath = (program) => typeof program?.system?.rez === "object" && program.system.rez !== null ? "system.rez.value" : "system.rez";
+export const progRez = (program) => Number(foundry.utils.getProperty(program, progRezPath(program)));
 /** GM, when an exchange resolves: such a Black ICE that hit names a random installed program (main card and Speed rows) */
 function pickPrograms(s) {
     const scene = game.scenes?.get(s.scene);
@@ -713,7 +717,7 @@ function pickPrograms(s) {
     }
 }
 /** the card's "Program" block: which program was hit, what was done to it */
-function programSection(pick, applied, slot) {
+export function programSection(pick, applied, slot) {
     if (pick === undefined)
         return "";
     const line = pick ? `<p class="cprnet-net-applied"><i class="fas fa-microchip"></i> Program hit: <strong>${esc(pick.name)}</strong> <span>(random)</span></p>`
@@ -726,7 +730,7 @@ function programSection(pick, applied, slot) {
 /** GM controls: Derez (ASP / Raven) or the REZ damage on a random / chosen program (Dragon / Sabertooth / Killer), with Undo */
 /** the program chosen in a card's dropdown – kept while the card re-renders (e.g. after the damage roll) */
 const progChoice = new Map();
-function programControls(slot, o) {
+export function programControls(slot, o) {
     if (o.applied) {
         slot.append(button("Undo", "fa-rotate-left", o.undo, true, o.applied.kind === "derez" ? "Rez the program again" : "Give the program its REZ back (and rez it again)", { kind: "reset" }));
         return;
@@ -770,17 +774,17 @@ function programControls(slot, o) {
 }
 // ---------- Skunk: every Slide check of the Netrunner −2 (an active effect, counted by this module's Slide roll) ----------
 const SKUNK_FLAG = "skunk";
-const isSkunk = (actor, name = "") => /\bskunk\b/i.test(`${actor?.name ?? ""} ${name}`);
+export const isSkunk = (actor, name = "") => /\bskunk\b/i.test(`${actor?.name ?? ""} ${name}`);
 /** −2 per Skunk effect on the actor (one per Skunk that hit) */
 function skunkPenalty(actor) {
     const effects = Array.from(actor?.effects ?? []).filter(e => !e.disabled && foundry.utils.getProperty(e, `flags.${MODULE}.${SKUNK_FLAG}`));
     return -2 * new Set(effects.map(e => String(foundry.utils.getProperty(e, `flags.${MODULE}.${SKUNK_FLAG}.ice`) ?? e.id))).size;
 }
-function skunkSection(applied, slot) {
+export function skunkSection(applied, slot) {
     const line = applied ? `<p class="cprnet-net-applied"><i class="fas fa-person-skiing"></i> ${esc(applied.name)}: <strong>Slide −2</strong> <span>(until the Skunk is derezzed)</span></p>` : "";
     return section("netprogram", "Skunk", line + `<div class="cprnet-damage-application"><div class="cprnet-net-controls cprnet-damage-controls" ${slot}></div></div>`);
 }
-function skunkControls(slot, o) {
+export function skunkControls(slot, o) {
     if (o.applied) {
         slot.append(button("Undo", "fa-rotate-left", o.undo, true, "Remove the Slide −2 effect again", { kind: "reset" }));
         return;
@@ -844,6 +848,15 @@ async function undoEffect(message, ref, runnerActor) {
     }
 }
 /** what an applied effect is, in one line (Jack Out summary) */
+/** programs the rules destroy – this module only derezzes them (Asp; Dragon / Killer / Sabertooth below 1 REZ; Poison Flatline) */
+export const DESTROYED_NOTE = " – by the rules DESTROYED: delete it from the Cyberdeck and buy it again";
+export function destroyedByRules(progApplied, iceName = "") {
+    if (!progApplied)
+        return false;
+    if (progApplied.kind === "derez")
+        return /\basp\b/i.test(iceName);
+    return !!progApplied.derezzed && /\bdragon\b|\bsabre?tooth\b|\bkiller\b/i.test(iceName);
+}
 function effectLabel(s, ref) {
     const t = ref.row === undefined ? s : s.rows?.[ref.row];
     const ice = ref.row === undefined ? s.ice?.name : s.rows?.[ref.row]?.ice.name;
@@ -854,7 +867,8 @@ function effectLabel(s, ref) {
     if (ref.field === "skunk")
         return `${s.runner.name}: Slide −2 – ${ice}`;
     if (ref.field === "prog" && t.progApplied)
-        return t.progApplied.kind === "derez" ? `${t.progApplied.name} derezzed – ${ice}` : `${t.progApplied.name}: −${t.progApplied.amount} REZ${t.progApplied.derezzed ? ", derezzed" : ""} – ${ice}`;
+        return (t.progApplied.kind === "derez" ? `${t.progApplied.name} derezzed – ${ice}` : `${t.progApplied.name}: −${t.progApplied.amount} REZ${t.progApplied.derezzed ? ", derezzed" : ""} – ${ice}`)
+            + (destroyedByRules(t.progApplied, ice) ? DESTROYED_NOTE : "");
     const a = t.applied;
     if (a.kind === "stats")
         return `${a.name}: ${(a.stats ?? []).map(x => `${x.stat.toUpperCase()} ${x.before}→${x.after}`).join(", ")} – ${ice}`;
@@ -937,13 +951,13 @@ async function redoEffect(message, ref, data, runnerActor) {
 }
 const SUMMARY_FLAG = "netSummary";
 /** GM, on Jack Out: one chat card with everything of this run that can still be undone */
-export async function postJackOutSummary(token) {
+export async function postJackOutSummary(token, unsafe) {
     if (!game.user?.isGM || !token)
         return;
     const entries = [];
     for (const message of Array.from((game.messages ?? []))) {
         const s = foundry.utils.getProperty(message, `flags.${MODULE}.${CARD_FLAG}`);
-        if (!s || s.runner?.token !== token.id || s.scene !== token.parent?.id)
+        if (!s || s.type === "rvr" || s.runner?.token !== token.id || s.scene !== token.parent?.id)
             continue;
         for (const field of ["applied", "burn", "prog", "skunk"]) {
             // REZ damage the Netrunner did to Black ICE / Demons (Zap, Sword) is not offered – "Reset Net Arch" restores their REZ
@@ -955,11 +969,13 @@ export async function postJackOutSummary(token) {
                 entries.push({ message: message.id, field, row, label: effectLabel(s, { field, row }), data: snapshotOf(s, { field, row }) }); });
         }
     }
+    // what other Netrunners did to this one (Netrunner vs Netrunner)
+    entries.push(...rvrSummaryEntries(token));
     const actorUuid = token.actorLink ? token.actor?.uuid : game.actors?.get(token.actorId)?.uuid ?? token.actor?.uuid;
-    await ChatMessage.create({
+    return ChatMessage.create({
         speaker: ChatMessage.getSpeaker({ token, actor: token.actor }),
-        content: summaryHTML(token.name, entries.length),
-        flags: { [MODULE]: { [SUMMARY_FLAG]: { runner: token.name, actor: actorUuid, entries } } },
+        content: summaryHTML(token.name, entries.length + (unsafe ? 1 : 0)),
+        flags: { [MODULE]: { [SUMMARY_FLAG]: { runner: token.name, actor: actorUuid, entries, unsafe: unsafe ?? null } } },
     });
 }
 function summaryHTML(name, count) {
@@ -967,6 +983,9 @@ function summaryHTML(name, count) {
     return `<section class="rollcard cprnet-net-card cprnet-net-summary">${head}${section("pending", "Undo", count
         ? `<p class="cprnet-pending-status">Effects of this run that can be undone:</p><div class="cprnet-net-summary-list" data-net-summary></div>`
         : `<p class="cprnet-pending-status">Nothing to undo from this run.</p>`)}</section>`;
+}
+export function summaryOf(message) {
+    return foundry.utils.getProperty(message, `flags.${MODULE}.${SUMMARY_FLAG}`);
 }
 /** fills the Jack Out summary with the current state of every entry (Undo buttons for the GM) */
 function decorateSummary(message, root) {
@@ -977,6 +996,9 @@ function decorateSummary(message, root) {
     root.classList.add("cprnet-combat-message", "cprnet-net-message");
     const render = () => {
         list.innerHTML = "";
+        // Unsafe Jack Out: what the Black ICE did is read live from its card (applied after this summary was posted)
+        if (data.unsafe)
+            unsafeSummaryRows(list, data, render);
         for (const entry of data.entries) {
             const card = game.messages?.get(entry.message);
             const s = card ? foundry.utils.getProperty(card, `flags.${MODULE}.${CARD_FLAG}`) : undefined;
@@ -989,7 +1011,7 @@ function decorateSummary(message, root) {
                 list.append(row);
                 continue;
             }
-            const live = stillApplied(s, entry);
+            const live = entry.rvr ? !!s[entry.field] : stillApplied(s, entry);
             row.innerHTML = `<span class="cprnet-net-summary-label${live ? "" : " is-undone"}">${esc(entry.label || (live ? effectLabel(s, entry) : "") || "–")}</span>`;
             if (!game.user?.isGM) {
                 if (!live)
@@ -1000,10 +1022,10 @@ function decorateSummary(message, root) {
             if (live)
                 row.append(button("Undo", "fa-rotate-left", async () => {
                     const actor = data.actor ? await fromUuid(data.actor) : undefined;
-                    await undoEffect(card, entry, actor);
+                    await (entry.rvr ? rvrUndo(card, entry.field, actor) : undoEffect(card, entry, actor));
                     render();
                 }, true, "Undo this effect", { kind: "reset" }));
-            else if (entry.data)
+            else if (entry.data && !entry.rvr)
                 row.append(button("Redo", "fa-rotate-right", async () => {
                     const actor = data.actor ? await fromUuid(data.actor) : undefined;
                     await redoEffect(card, entry, entry.data, actor);
@@ -1015,7 +1037,7 @@ function decorateSummary(message, root) {
     render();
 }
 /** Liche: INT, REF, DEX −damage · Scorpion: MOVE −damage (each minimum 1, for an hour) · Hellhound: brain damage + On Fire (Mild) */
-function specialOf(actor, name = "") {
+export function specialOf(actor, name = "") {
     const text = `${actor?.name ?? ""} ${name}`.toLowerCase();
     if (/\bliche\b/.test(text))
         return "liche";
@@ -1026,22 +1048,22 @@ function specialOf(actor, name = "") {
     return;
 }
 const SPECIAL_STATS = { liche: ["int", "ref", "dex"], scorpion: ["move"] };
-function onFireMildId() {
+export function onFireMildId() {
     const all = (CONFIG.statusEffects ?? []);
     return all.find(e => /on\s*fire\s*\(?\s*mild/i.test(String(e.name ?? e.label ?? "")))?.id
         ?? all.find(e => e.id === "r4mbggwd1jmrvhjt")?.id;
 }
 /** the "applied" lines under the damage */
-function appliedHTML(a, zap) {
+export function appliedHTML(a, zap) {
     if (!a)
         return "";
     if (a.kind === "stats")
         return `<p class="cprnet-net-applied"><i class="fas fa-brain"></i> ${esc(a.name)}: <strong>${(a.stats ?? []).map(x => `${esc(x.stat.toUpperCase())} ${x.before} → ${x.after}`).join(" · ")}</strong> <span>(for the next hour, minimum 1)</span></p>`;
     return `<p class="cprnet-net-applied"><i class="fas ${zap ? "fa-bolt" : "fa-brain"}"></i> ${esc(a.name)}: <strong>−${a.amount} ${zap ? "REZ" : "HP"}</strong> <span>(${a.before} → ${a.after}${zap ? "" : ", direct to the brain – armor ignored"})</span></p>`;
 }
-const burnHTML = (b) => b ? `<p class="cprnet-net-applied"><i class="fas fa-fire"></i> ${esc(b.name)}: <strong>On Fire (Mild)</strong>${b.ticks ? ` <span>(burned ${b.ticks}× · −${2 * b.ticks} HP)</span>` : ""}</p>` : "";
+export const burnHTML = (b) => b ? `<p class="cprnet-net-applied"><i class="fas fa-fire"></i> ${esc(b.name)}: <strong>On Fire (Mild)</strong>${b.ticks ? ` <span>(burned ${b.ticks}× · −${2 * b.ticks} HP)</span>` : ""}</p>` : "";
 /** GM buttons under a damage roll: Apply / Undo, by Black ICE (Liche, Scorpion: stats; Hellhound: + On Fire) */
-function applyButtons(slot, o) {
+export function applyButtons(slot, o) {
     const actor = o.runner?.actor;
     if (!actor)
         return;
@@ -1098,24 +1120,20 @@ function applyButtons(slot, o) {
                 await applyCombatStatus(actor, id);
                 await o.setBurn({ name: o.runner.name, statusId: id });
             }, true, "Hellhound: the Netrunner is set On Fire (Mild)", { className: "cprnet-apply-damage" }));
-        else {
-            // On Fire (Mild): 2 HP each turn it burns – press once per turn
-            slot.append(button(`Burn: −2 HP to ${o.runner.name}`, "fa-fire-flame-simple", async () => {
-                const before = Number(foundry.utils.getProperty(actor, "system.derivedStats.hp.value"));
-                if (!Number.isFinite(before))
-                    throw Error(`${actor.name} has no HP value.`);
-                await actor.update({ "system.derivedStats.hp.value": before - 2 });
-                await o.setBurn({ ...o.burn, ticks: (o.burn.ticks ?? 0) + 1 });
-            }, true, "On Fire (Mild): 2 damage to HP – press once for every turn it burns", { className: "cprnet-apply-damage" }));
-            slot.append(button("Undo On Fire", "fa-rotate-left", async () => {
+        else
+            // the 2 HP per turn come from the On Fire status itself (Combat Tools) – here only putting it out
+            slot.append(button("Put out fire", "fa-fire-extinguisher", async () => {
                 await actor.toggleStatusEffect(o.burn.statusId, { active: false });
                 await o.setBurn(null);
-            }, true, "Remove On Fire (Mild) again", { kind: "reset" }));
-        }
+            }, true, "The fire is out (e.g. a Meat Action) – removes On Fire (Mild)", { kind: "reset" }));
     }
 }
 async function applyPatch(message, patch, userId) {
     const s = foundry.utils.deepClone(foundry.utils.getProperty(message, `flags.${MODULE}.${CARD_FLAG}`));
+    if (s?.type === "rvr")
+        return applyRvrPatch(message, s, patch, userId);
+    if (s?.type === "unsafe")
+        return applyUnsafePatch(message, s, patch, userId);
     if (!s || s.state !== "waiting" && !((patch.damage || "applied" in patch || "burn" in patch || "progApplied" in patch || "skunk" in patch || patch.rowDamage || patch.rowApplied || patch.rowBurn || patch.rowProgApplied || patch.rowSkunk) && s.state === "resolved") && !("dv" in patch))
         return;
     const user = game.users?.get(userId);
@@ -1208,7 +1226,7 @@ async function applyPatch(message, patch, userId) {
     for (const [json, roller] of dice)
         void showSavedDice([json], "publicroll", roller).catch(() => { });
 }
-async function send(message, patch) {
+export async function send(message, patch) {
     if (game.user?.isGM)
         return applyPatch(message, patch, game.user.id);
     if (!primaryGM())
@@ -1217,12 +1235,18 @@ async function send(message, patch) {
 }
 // ---------- starting actions ----------
 /** Netrunner action on its floor (or on itself) */
+/** NET Actions the Netrunner chooses (Core p. 197) – counted on the NET Actions counter */
+const COSTS_ACTION = new Set(["backdoor", "eyedee", "control", "virus", "pathfinder", "cloak", "slide", "zap", "sword", "banhammer"]);
 export async function runNetAction(runner, actionId, floor) {
     const action = NET_ACTIONS[actionId];
     if (!action || !runner?.actor)
         return;
     if (!runner.actor.isOwner)
         return void ui.notifications.warn(`You do not own ${runner.name}.`);
+    // every action the Netrunner chooses costs a NET Action (the Speed check against Black ICE is a reaction)
+    const cost = COSTS_ACTION.has(action.id) ? 1 : 0;
+    if (cost && !(await canSpendNetActions(runner, cost, action.label)))
+        return;
     const all = floor.ice ?? [];
     const roll = await runnerRoll(runner, action);
     if (!roll || !Number.isFinite(roll.total))
@@ -1246,6 +1270,7 @@ export async function runNetAction(runner, actionId, floor) {
     if (!action.versus)
         resolve(s);
     await ChatMessage.create({ speaker: ChatMessage.getSpeaker({ actor: runner.actor, token: runner }), content: cardHTML(s), flags: { [MODULE]: { [CARD_FLAG]: s } } });
+    await spendNetActions(runner, cost);
     for (const json of roll.dice)
         void showSavedDice([json], "publicroll", roll.roller).catch(() => { });
 }
@@ -1274,7 +1299,7 @@ export async function startIceAction(ice, runner, stat, floorLabel) {
 }
 /** a card button in Pneuma's chat-button look: chat-buttons.ts styles every [data-net-button]
  *  (GM-only buttons get Pneuma's GM mark, "cancel" a red, "reset" an amber border, icon-only buttons are square) */
-function button(label, icon, run, gm = false, title = "", style = {}) {
+export function button(label, icon, run, gm = false, title = "", style = {}) {
     const b = document.createElement("button");
     b.type = "button";
     b.dataset.netButton = "";
@@ -1303,16 +1328,22 @@ function button(label, icon, run, gm = false, title = "", style = {}) {
     return b;
 }
 /** where the damage goes: Netrunner HP, or the Black ICE's / Demon's current REZ */
-function damageTarget(actor, rez) {
+export function damageTarget(actor, rez) {
     const paths = rez ? ["system.stats.rez.value", "system.rez.value", "system.stats.rez", "system.rez"] : ["system.derivedStats.hp.value"];
     return paths.find(path => Number.isFinite(Number(foundry.utils.getProperty(actor, path))) && typeof foundry.utils.getProperty(actor, path) !== "object");
 }
 function decorate(message, root) {
     if (foundry.utils.getProperty(message, `flags.${MODULE}.${SUMMARY_FLAG}`))
         return decorateSummary(message, root);
+    if (foundry.utils.getProperty(message, `flags.${MODULE}.${TICK_FLAG}`))
+        return decorateTick(message, root);
     const s = foundry.utils.getProperty(message, `flags.${MODULE}.${CARD_FLAG}`);
     if (!s)
         return;
+    if (s.type === "rvr")
+        return decorateRvr(message, root, s);
+    if (s.type === "unsafe")
+        return decorateUnsafe(message, root, s);
     root.classList.add("cprnet-combat-message", "cprnet-net-message");
     // cards posted by older versions are drawn again from their saved state (header bar, no own portrait column)
     const content = root.querySelector(".message-content");
@@ -1496,6 +1527,9 @@ export function registerNetActions() {
         decorate(message, html[0]); });
     for (const hook of ["createChatMessage", "updateChatMessage"])
         Hooks.on(hook, (message) => { void recordPassage(message).catch(error => console.error(MODULE, "NET passage", error)); });
+    // Hellbolt: a burning Netrunner ends its Turn – the GM gets a small card (Apply 2 damage / put out)
+    Hooks.on("updateCombat", (combat, changes) => { if ("turn" in changes || "round" in changes)
+        void burnTick(combat).catch(error => console.error(MODULE, "Hellbolt", error)); });
     Hooks.once("ready", () => {
         game.socket.on(CHANNEL, (packet) => {
             if (!packet?.netcard)
