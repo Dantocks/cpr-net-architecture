@@ -11,7 +11,6 @@ This module brings the **tools** to run a NET Architecture – **not the NET con
 4. **Never place a Demon on Floor 1.**
 
 <img width="590" height="834" alt="image" src="https://github.com/user-attachments/assets/5a17183b-4070-479c-aa8e-f2aa9b631cb9" />
-<img width="999" height="398" alt="image" src="https://github.com/user-attachments/assets/e714d51a-8abd-4922-b1a8-4710084f0b01" />
 <img width="1082" height="667" alt="image" src="https://github.com/user-attachments/assets/e3f24737-e17d-45ef-8dfe-ffab52d29ba3" />
 <img width="305" height="950" alt="image" src="https://github.com/user-attachments/assets/afc79f83-ee11-4fff-b810-8cf4de2a908e" />
 <img width="927" height="382" alt="image" src="https://github.com/user-attachments/assets/7777f9eb-6a8d-41f4-9463-42dfe08c267d" />
