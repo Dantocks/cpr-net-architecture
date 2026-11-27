@@ -7,7 +7,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { primaryGM, ACTIONS_FLAG, PENALTY_FLAG, netActionsLimit, netActionsOf, netActionsPenaltyOf, spendNetActions } from "./support.js";
 import { runnerAttackItems, glueOf, setForceOut, postUnsafeCard, linkUnsafeSummary, iceMetOnCards } from "./runner-combat.js";
-import { actionsForKinds, configureFloor, FLOOR_KINDS, floorInfo, ICE_ACTIONS, RUNNER_ACTIONS, runNetAction, startIceAction, hasPassed, passageOpen, togglePassage, clearPassages, restoreRez, postJackOutSummary, goingQuiet, stealthOf, isStealthed, postStealthCard, stealthResult } from "./net-actions.js";
+import { programItems, rezzedText } from "./programs.js";
+import { attackerLeft, ATTACK_USES_FLAG, derezAll, actionsForKinds, configureFloor, FLOOR_KINDS, floorInfo, ICE_ACTIONS, RUNNER_ACTIONS, runNetAction, startIceAction, hasPassed, passageOpen, togglePassage, clearPassages, restoreRez, postJackOutSummary, goingQuiet, stealthOf, isStealthed, postStealthCard, stealthResult } from "./net-actions.js";
 const MODULE = "cpr-net-architecture";
 const CHANNEL = "module.cpr-net-architecture";
 const AP_FLAG = "accessPoint";
@@ -110,11 +111,18 @@ function entryFloor(scene, _data) {
 const centerOf = (b) => ({ x: b.x + b.width / 2, y: b.y + b.height / 2 });
 const inside = (b, x, y) => x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height;
 /** Token position centred on a floor; several Netrunners on one floor are fanned out a little. */
-function spotOn(scene, floor, token) {
+/** Going Quiet: a stealthed Netrunner (also while jacking in quietly) */
+const sneaking = (t) => ["active", "establishing"].includes(String(foundry.utils.getProperty(t ?? {}, `flags.${MODULE}.${RUN_FLAG}.stealth`) ?? ""));
+/** where a Netrunner stands on a floor. Visible Netrunners take the centre and the four diagonal spots – counting only
+ *  the visible ones; stealthed Netrunners always stand at the left / right edge, so the position of a visible Netrunner
+ *  never gives a hidden one away. stealth: explicit (Jack In: the token does not have its flags yet). */
+function spotOn(scene, floor, token, stealth = sneaking(token)) {
     const grid = gridOf(scene), w = (token.width || 1) * grid, h = (token.height || 1) * grid;
     const c = centerOf(floor.bounds);
-    const others = Array.from(scene.tokens ?? []).filter(t => t.id !== token.id && flagOf(t, RUN_FLAG) && inside(floor.bounds, t.x + (t.width || 1) * grid / 2, t.y + (t.height || 1) * grid / 2)).length;
-    const shift = [[0, 0], [-0.3, 0.3], [0.3, 0.3], [-0.3, -0.3], [0.3, -0.3]][others % 5];
+    const others = Array.from(scene.tokens ?? []).filter(t => t.id !== token.id && flagOf(t, RUN_FLAG) && sneaking(t) === stealth
+        && inside(floor.bounds, t.x + (t.width || 1) * grid / 2, t.y + (t.height || 1) * grid / 2)).length;
+    const shift = stealth ? [[-0.36, 0], [0.36, 0], [-0.36, -0.36], [0.36, -0.36]][others % 4]
+        : [[0, 0], [-0.3, 0.3], [0.3, 0.3], [-0.3, -0.3], [0.3, -0.3]][others % 5];
     return { x: Math.round(c.x - w / 2 + shift[0] * floor.bounds.width), y: Math.round(c.y - h / 2 + shift[1] * floor.bounds.height) };
 }
 /** GM: hide all tiles and tokens to the right of the entry floor (the entry floor and anything left of it,
@@ -384,7 +392,7 @@ function blockedPrompt(scene, runner, block, proceed) {
     const roll = (action) => void (async () => {
         const c = { x: runner.x + (runner.width || 1) * grid / 2, y: runner.y + (runner.height || 1) * grid / 2 };
         if (!inside(floor.bounds, c.x, c.y))
-            await runner.update(spotOn(scene, floor, runner));
+            await moveNetToken(runner, floor);
         await runNetAction(runner, action, { label: block.floor, tile, ice });
     })().catch(fail);
     const buttons = {};
@@ -544,6 +552,17 @@ function netToken(scene, sourceUuid, actorId) {
 function lyingInWaitAtJackIn(doc) {
     setTimeout(() => void ambushEncounter(doc).catch(error => console.error(MODULE, "NET encounter", error)), 250);
 }
+/** Jack In: all programs start derezzed (each rez is a NET Action) */
+async function derezAtJackIn(actor) {
+    try {
+        const n = await derezAll(actor);
+        if (n)
+            ui.notifications.info(`${actor.name}: ${n} program(s) derezzed at Jack In – rezzing one costs a NET Action.`);
+    }
+    catch (error) {
+        console.error(MODULE, "derez at Jack In", error);
+    }
+}
 async function gmJackIn(request) {
     const user = game.users?.get(request.user);
     const ap = fromUuidSync(request.accessPoint);
@@ -573,17 +592,19 @@ async function gmJackIn(request) {
     if (existing) {
         // Same Access Point: continue on the current floor. Another Access Point: start at its entry floor.
         const same = flagOf(existing, `${RUN_FLAG}.accessPoint`) === ap.uuid;
-        await existing.update({ ...(same ? {} : spotOn(scene, floor, existing)), hidden: false, [`flags.${MODULE}.${RUN_FLAG}`]: run }, { animate: false });
+        await existing.update({ ...(same ? {} : spotOn(scene, floor, existing, !!run.stealth)), hidden: false, [`flags.${MODULE}.${RUN_FLAG}`]: run, [`flags.${MODULE}.-=${ATTACK_USES_FLAG}`]: null }, { animate: false });
+        await derezAtJackIn(existing.actor);
         lyingInWaitAtJackIn(existing);
         return existing.id;
     }
     const tokenData = source.toObject();
     delete tokenData._id;
-    Object.assign(tokenData, spotOn(scene, floor, { width: source.width, height: source.height }), { hidden: false, elevation: 0 });
+    Object.assign(tokenData, spotOn(scene, floor, { width: source.width, height: source.height }, !!run.stealth), { hidden: false, elevation: 0 });
     foundry.utils.setProperty(tokenData, `flags.${MODULE}.${RUN_FLAG}`, run);
     if (tokenData.flags?.[MODULE])
         delete tokenData.flags[MODULE].movement; // meat-space movement history stays behind
     const [created] = await scene.createEmbeddedDocuments("Token", [tokenData]);
+    await derezAtJackIn(created?.actor);
     lyingInWaitAtJackIn(created);
     return created.id;
 }
@@ -618,7 +639,53 @@ async function gmJackOut(request) {
 const pending = new Map();
 let queue = Promise.resolve();
 async function runRequest(request) {
+    if (request.action === "move")
+        return gmMove(request);
     return request.action === "jack-in" ? gmJackIn(request) : (await gmJackOut(request), undefined);
+}
+/** a Netrunner goes to a floor. Players: the GM's client moves the token (so Combat Tools' movement mode never stops a
+ *  NET move – GM moves are not blocked); without an active GM the player moves it himself. */
+let noGMHint = false;
+async function moveNetToken(token, floor) {
+    if (game.user?.isGM || !isRunnerToken(token))
+        return token.update(spotOn(token.parent, floor, token));
+    if (!primaryGM()) {
+        if (!noGMHint) {
+            noGMHint = true;
+            ui.notifications.warn("No GM online – your Netrunner moves directly (Combat Tools' movement mode may stop it).");
+        }
+        return token.update(spotOn(token.parent, floor, token));
+    }
+    await sendRequest("move", flagOf(token, `${RUN_FLAG}.accessPoint`) ?? "", { scene: token.parent.id, token: token.id, floor: floor.id });
+}
+/** primary GM: checks a player's NET move – his own NET token, a floor of this architecture, nothing in the way */
+async function gmMove(request) {
+    const user = game.users?.get(request.user);
+    const scene = game.scenes?.get(request.scene ?? "");
+    const token = scene?.tokens?.get(request.token ?? "");
+    if (!user || !token)
+        throw Error("The Netrunner is no longer in the NET.");
+    if (!isRunnerToken(token))
+        throw Error(`${token.name} is not a Netrunner in the NET.`);
+    if (!user.isGM && !token.actor?.testUserPermission(user, "OWNER"))
+        throw Error(`You do not own ${token.name}.`);
+    const floors = floorList(scene), floor = floors.find(f => f.id === request.floor);
+    if (!floor)
+        throw Error("That floor does not exist (any more).");
+    if (!user.isGM) {
+        if (floor.hidden)
+            throw Error("That floor is not revealed.");
+        const grid = gridOf(scene), w = (token.width || 1) * grid / 2, h = (token.height || 1) * grid / 2;
+        const from = { x: token.x + w, y: token.y + h }, current = floorAtPoint(floors, from);
+        const glue = glueOf(token);
+        if (glue && current && floorDepth(scene, floor) > floorDepth(scene, current))
+            throw Error(`${token.name} is held by Superglue (${glue.rounds} round${glue.rounds === 1 ? "" : "s"} left) and can't go deeper.`);
+        const block = pathBlock(scene, token, from, centerOf(floor.bounds));
+        if (block)
+            throw Error(`${token.name}: path blocked due to ${blockReason(block)}.`);
+    }
+    await token.update(spotOn(scene, floor, token), { cprnetPathConfirmed: true });
+    return token.id;
 }
 function sendRequest(action, accessPoint, extra) {
     const gm = primaryGM();
@@ -652,7 +719,8 @@ async function stealthEncounter(doc) {
     if (!floor)
         return;
     const seen = stealthSeen(doc);
-    const opponents = iceOfFloor(scene, floor).filter(t => !seen[t.id]);
+    const npcs = Array.from(scene.tokens ?? []).filter(t => isNpcRunner(t) && floorOfDoc(scene, t)?.id === floor.id);
+    const opponents = [...iceOfFloor(scene, floor), ...npcs].filter(t => !seen[t.id]);
     if (!opponents.length)
         return;
     // one open card at a time per Netrunner
@@ -868,7 +936,7 @@ class NetView extends Application {
         if (!t || (!game.user?.isGM && t.hidden))
             return false;
         if (game.user?.isGM)
-            return isRunnerToken(t) || isIce(t);
+            return isRunnerToken(t) || isIce(t) || isNpcRunner(t);
         return isRunnerToken(t) && !!t.isOwner;
     }
     get active() {
@@ -884,7 +952,8 @@ class NetView extends Application {
         }
         return undefined;
     }
-    activeRunner() { const a = this.active; return a && isRunnerToken(a) ? a : undefined; }
+    /** the active token that moves floor by floor: a jacked-in Netrunner – for the GM also an NPC Netrunner of the architecture */
+    activeRunner() { const a = this.active; return a && actsAsRunner(a) ? a : undefined; }
     /** every token this user can make active, in reading order (Tab) */
     controllable() {
         return Array.from(this.scene?.tokens ?? []).filter(t => this.canControl(t)).sort((a, b) => (a.x - b.x) || (a.y - b.y));
@@ -916,11 +985,11 @@ class NetView extends Application {
         // Concept D: row 1 always the same (active token · floor ‹ › · NET Actions · status slot · ? · rules · overview ·
         // Jack Out), row 2 only for the GM (Show · Save Start | Reset · Unplug all). Nothing shifts any more: controls that
         // do not apply right now are greyed out instead of disappearing, the status slot keeps its width.
-        const gm = !!game.user?.isGM, active = this.active, runner = active && isRunnerToken(active) ? active : undefined;
+        const gm = !!game.user?.isGM, active = this.active, runner = active && actsAsRunner(active) ? active : undefined;
         const hint = ["Click a token: make it active (Tab: next)", "click a floor or use the arrow keys: move the active Netrunner", "right-click a token: actions", gm ? "right-click a floor: floor settings" : "", "double-click: sheet", "wheel: zoom · drag: pan"].filter(Boolean).join("\n");
         const max = runner ? netActionsLimit(runner) : 0;
         const off = runner ? "" : " disabled";
-        const canJackOut = !!runner && (gm || runner.isOwner);
+        const canJackOut = !!runner && isRunnerToken(runner) && (gm || runner.isOwner);
         return `<div class="cprnet-netview-row">
         <span class="cprnet-netview-active${active ? "" : " is-none"}" title="${active ? `Active: ${esc(active.name)} – left-click another token (or Tab) to switch` : "No active token – left-click a token (or press Tab)"}">${active ? `<img src="${esc(tokenImg(active))}" alt="">` : `<i class="fas fa-hand-pointer"></i>`}<span><small>Active</small>${active ? esc(active.name) : "–"}</span></span>
         <button type="button" data-net-step="-1" title="Previous floor"${off}><i class="fas fa-chevron-left"></i></button>
@@ -961,7 +1030,7 @@ class NetView extends Application {
         });
         footer.querySelector("[data-net-help]")?.addEventListener("click", (event) => ui.notifications.info(event.currentTarget.title.replace(/\n/g, " · ")));
         footer.querySelector("[data-net-fit]")?.addEventListener("click", () => { this.userZoomed = false; this.view = undefined; this.draw(); });
-        footer.querySelector("[data-net-jackout]")?.addEventListener("click", () => { const r = this.activeRunner(); if (r)
+        footer.querySelector("[data-net-jackout]")?.addEventListener("click", () => { const r = this.activeRunner(); if (r && isRunnerToken(r))
             void this.jackOut(r); });
         footer.querySelectorAll("[data-net-act]").forEach(button => button.addEventListener("click", () => {
             const token = this.activeRunner();
@@ -1209,7 +1278,7 @@ class NetView extends Application {
         parts.push(this.accessHTML(gm));
         // hover highlight for the floor under the mouse (set in hover())
         parts.push(`<div class="cprnet-netview-hover" hidden></div>`);
-        const tokens = Array.from(scene.tokens ?? []).filter(t => gm || !t.hidden).sort((a, b) => (a.elevation - b.elevation) || ((a.sort ?? 0) - (b.sort ?? 0)));
+        const tokens = Array.from(scene.tokens ?? []).filter(t => seenBy(t, gm)).sort((a, b) => (a.elevation - b.elevation) || ((a.sort ?? 0) - (b.sort ?? 0)));
         for (const t of tokens) {
             let src = String(t.texture?.src ?? "");
             if (!src || src.includes("*"))
@@ -1220,7 +1289,7 @@ class NetView extends Application {
             const stealth = flagOf(t, RUN_FLAG) ? stealthOf(t) : undefined;
             const stealthClass = stealth === "active" ? " is-stealth" : stealth === "establishing" ? " is-stealth-pending" : "";
             const badge = stealth === "active" || stealth === "establishing" ? `<span class="cprnet-netview-stealth-badge" title="${stealth === "active" ? "Stealthed" : "Jacking In quietly"}"><i class="fas fa-user-secret"></i></span>` : "";
-            parts.push(`<div class="cprnet-netview-token${own ? " is-own" : ""}${act ? " is-active" : ""}${this.canControl(t) ? " is-controllable" : ""}${stealthClass}${t.hidden ? " is-hidden" : ""}" data-token="${t.id}" title="${esc(t.name)}${stealth === "active" ? " – stealthed" : ""}"
+            parts.push(`<div class="cprnet-netview-token${own ? " is-own" : ""}${act ? " is-active" : ""}${this.canControl(t) ? " is-controllable" : ""}${stealthClass}${t.hidden ? " is-hidden" : ""}" data-token="${t.id}" title="${esc(t.name)}${stealth === "active" ? " – stealthed" : ""}${isNpcRunner(t) ? `&#10;${esc(rezzedText(t.actor))}` : ""}"
         style="${box(t.x, t.y, (t.width || 1) * grid, (t.height || 1) * grid)};opacity:${t.hidden ? 0.5 : t.alpha ?? 1}"><img src="${esc(src)}" alt="" style="transform:rotate(${t.rotation || 0}deg) scale(${sx},${sy})">${badge}</div>`);
         }
         for (const t of tiles.filter(t => t.elevation >= fgElevation))
@@ -1335,7 +1404,7 @@ class NetView extends Application {
         const block = game.user?.isGM ? undefined : pathBlock(this.scene, token, { x: token.x + w, y: token.y + h }, centerOf(floor.bounds));
         if (block)
             return void blockedPrompt(this.scene, token, block);
-        await token.update(spotOn(this.scene, floor, token));
+        await moveNetToken(token, floor);
     }
     floorBlock(floor, token) {
         const block = floorBlockOn(this.scene, floor, token);
@@ -1359,7 +1428,7 @@ class NetView extends Application {
     /** topmost visible token / tile under a scene point */
     tokenAt(x, y) {
         const gm = !!game.user?.isGM, grid = gridOf(this.scene);
-        return Array.from(this.scene?.tokens ?? []).filter(t => (gm || !t.hidden) && x >= t.x && y >= t.y && x <= t.x + (t.width || 1) * grid && y <= t.y + (t.height || 1) * grid)
+        return Array.from(this.scene?.tokens ?? []).filter(t => seenBy(t, gm) && x >= t.x && y >= t.y && x <= t.x + (t.width || 1) * grid && y <= t.y + (t.height || 1) * grid)
             .sort((a, b) => (b.elevation - a.elevation) || ((b.sort ?? 0) - (a.sort ?? 0)))[0];
     }
     tileAt(x, y) {
@@ -1403,14 +1472,24 @@ class NetView extends Application {
         const rect = body.getBoundingClientRect();
         const menu = document.createElement("div");
         menu.className = "cprnet-netview-menu";
+        // a dropdown's entries are added at the end of the list (their indexes for the click handler)
+        items = [...items];
+        const shown = items.length;
+        const childIndex = new Map();
+        for (let i = 0; i < shown; i++)
+            if (items[i].dropdown)
+                childIndex.set(i, (items[i].children ?? []).map(child => items.push(child) - 1));
         const html = (item, i) => item.separator ? `<hr>`
+            : item.dropdown ? `<div class="cprnet-netview-menu-dropdown${item.open ? " is-open" : ""}"><button type="button" class="cprnet-netview-menu-dropdown-toggle" data-dropdown title="${esc(item.title ?? "")}"><i class="fas ${item.icon}"></i> <span>${esc(item.label)}</span><i class="fas fa-caret-right cprnet-dropdown-caret"></i></button><div class="cprnet-netview-menu-dropdown-list"${item.open ? "" : " hidden"}>${childIndex.get(i).map(j => html(items[j], j)).join("")}</div></div>`
+            // a program: the switch rezzes / derezzes, the name opens the item
+            : item.openItem ? `<button type="button" data-item="${i}" class="cprnet-program-row${item.active ? " active" : ""}${item.disabled ? " is-disabled" : ""}"${item.disabled ? " aria-disabled=\"true\"" : ""} title="${esc(item.title ?? "")}"><i class="fas ${item.icon}"></i><span data-open="${i}" class="cprnet-program-name" role="link" tabindex="0" title="Open ${esc(item.label)}">${esc(item.label)}</span>${item.sub ? `<small>${esc(item.sub)}</small>` : ""}</button>`
             : item.section ? `<span class="cprnet-netview-menu-section">${esc(item.label)}</span>`
             : item.text ? `<span class="cprnet-netview-menu-cell" title="${esc(item.title ?? "")}">${esc(item.label)}${item.sub ? `<small>${esc(item.sub)}</small>` : ""}</span>`
-                : `<button type="button" data-item="${i}" class="${item.active ? "active" : ""}${item.disabled ? " is-disabled" : ""}"${item.disabled ? " disabled" : ""} title="${esc(item.title ?? "")}" aria-label="${esc(item.title || item.label)}">${!item.label ? `<i class="fas ${item.icon}"></i>` : item.iconAfter ? `${esc(item.label)} <i class="fas ${item.icon}"></i>` : `<i class="fas ${item.icon}"></i> ${esc(item.label)}`}</button>`;
+                : `<button type="button" data-item="${i}" class="${item.active ? "active" : ""}${item.disabled ? " is-disabled" : ""}"${item.disabled ? " disabled" : ""} title="${esc(item.title ?? "")}" aria-label="${esc(item.title || item.label)}">${!item.label ? `<i class="fas ${item.icon}"></i>` : item.iconAfter ? `${esc(item.label)} <i class="fas ${item.icon}"></i>` : `<i class="fas ${item.icon}"></i> ${esc(item.label)}`}${item.sub && !item.text ? `<small>${esc(item.sub)}</small>` : ""}</button>`;
         // items sharing a "row" key sit side by side in one line
         // consecutive "matrix…" rows share one grid, so their columns line up
         let content = "", inMatrix = false;
-        for (let i = 0; i < items.length; i++) {
+        for (let i = 0; i < shown; i++) {
             const row = items[i].row, matrix = !!row?.startsWith("matrix");
             if (matrix && !inMatrix) {
                 content += `<div class="cprnet-netview-menu-matrix">`;
@@ -1425,7 +1504,7 @@ class NetView extends Application {
                 continue;
             }
             let group = "";
-            for (; i < items.length && items[i].row === row; i++)
+            for (; i < shown && items[i].row === row; i++)
                 group += html(items[i], i);
             i--;
             content += `<div class="cprnet-netview-menu-row${matrix ? " is-matrix" : ""}${row === "matrix:head" ? " is-head" : ""}">${group}</div>`;
@@ -1434,11 +1513,54 @@ class NetView extends Application {
             content += `</div>`;
         menu.innerHTML = `<strong>${esc(title)}</strong>${note ? `<small>${esc(note)}</small>` : ""}` + content;
         menu.addEventListener("contextmenu", e => e.preventDefault());
-        menu.querySelectorAll("[data-item]").forEach(button => button.addEventListener("click", e => {
+        const bind = (button) => button.addEventListener("click", e => {
             e.stopPropagation();
-            this.closeMenu();
-            void Promise.resolve(items[Number(button.dataset.item)].run?.()).catch(report);
-        }));
+            const index = Number(button.dataset.item), item = items[index];
+            if (button.getAttribute("aria-disabled") === "true")
+                return;
+            // "keepOpen" (the Programs dropdown): the menu stays open, the entry shows its new state
+            if (!item.keepOpen) {
+                this.closeMenu();
+                return void Promise.resolve(item.run?.()).catch(report);
+            }
+            button.disabled = true;
+            void Promise.resolve(item.run?.()).then(next => {
+                if (!menu.isConnected)
+                    return;
+                if (next) {
+                    items[index] = next;
+                    const box = document.createElement("div");
+                    box.innerHTML = html(next, index);
+                    const fresh = box.firstElementChild;
+                    (button.closest(".cprnet-program-row") ?? button).replaceWith(fresh);
+                    bindAll(fresh);
+                }
+                else
+                    button.disabled = !!item.disabled;
+                const details = menu.querySelector(".cprnet-netview-menu-dropdown");
+                const owner = items.find(i => i.dropdown && childIndex.get(items.indexOf(i))?.includes(index));
+                const label = owner?.summary?.();
+                const summary = details?.querySelector("[data-dropdown] > span");
+                if (label && summary)
+                    summary.textContent = label;
+            }).catch(error => { button.disabled = !!item.disabled; report(error); });
+        });
+        // a program's name: opens the item (the menu stays open)
+        const bindOpen = (link) => {
+            const open = (e) => { e.stopPropagation(); void Promise.resolve(items[Number(link.dataset.open)].openItem?.()).catch(report); };
+            link.addEventListener("click", open);
+            link.addEventListener("keydown", e => { if (e.key === "Enter")
+                open(e); });
+        };
+        const bindAll = (node) => {
+            if (node.matches?.("[data-item]"))
+                bind(node);
+            if (node.matches?.("[data-open]"))
+                bindOpen(node);
+            node.querySelectorAll?.("[data-item]").forEach(bind);
+            node.querySelectorAll?.("[data-open]").forEach(bindOpen);
+        };
+        bindAll(menu);
         // extreme case (many ICE on one floor): never taller than the window – scrolls vertically, scrollbar only when needed
         menu.style.maxHeight = `${Math.max(120, rect.height - 8)}px`;
         body.append(menu);
@@ -1454,10 +1576,24 @@ class NetView extends Application {
         } };
         const cleanup = () => { document.removeEventListener("pointerdown", outside, true); document.removeEventListener("keydown", escape, true); };
         setTimeout(() => { document.addEventListener("pointerdown", outside, true); document.addEventListener("keydown", escape, true); }, 0);
-        // keep it inside the window
-        const x = Math.min(event.clientX - rect.left, rect.width - menu.offsetWidth - 4), y = Math.min(event.clientY - rect.top, rect.height - menu.offsetHeight - 4);
-        menu.style.left = `${Math.max(4, x)}px`;
-        menu.style.top = `${Math.max(4, y)}px`;
+        // keep it inside the window – again whenever the Programs dropdown opens / closes (the menu changes its height)
+        const place = () => {
+            const x = Math.min(event.clientX - rect.left, rect.width - menu.offsetWidth - 4), y = Math.min(event.clientY - rect.top, rect.height - menu.offsetHeight - 4);
+            menu.style.left = `${Math.max(4, x)}px`;
+            menu.style.top = `${Math.max(4, y)}px`;
+        };
+        place();
+        menu.querySelectorAll(".cprnet-netview-menu-dropdown").forEach(d => d.querySelector("[data-dropdown]")?.addEventListener("click", e => {
+            e.stopPropagation();
+            const list = d.querySelector(".cprnet-netview-menu-dropdown-list"), open = !!list?.hidden;
+            if (list)
+                list.hidden = !open;
+            d.classList.toggle("is-open", open);
+            place();
+            // the opened list in view (the menu itself scrolls when it is taller than the window)
+            if (open && d.offsetTop + d.offsetHeight > menu.scrollTop + menu.clientHeight)
+                menu.scrollTop = Math.max(0, d.offsetTop - 8);
+        }));
     }
     revealItem(doc) {
         return { label: doc.hidden ? "Reveal for players" : "Hide from players", icon: doc.hidden ? "fa-eye" : "fa-eye-slash", run: () => doc.update({ hidden: !doc.hidden }) };
@@ -1493,15 +1629,19 @@ class NetView extends Application {
         }
         if (!active) {
             if (gm)
-                return this.showMenu(event, token.name, [...(isRunnerToken(token) ? [this.combatItem(token)] : []), this.revealItem(token)], report, "No active token – left-click a token first");
+                return this.showMenu(event, token.name, [...(actsAsRunner(token) ? [this.combatItem(token)] : []), this.revealItem(token)], report, "No active token – left-click a token first");
             return this.showMenu(event, token.name, [{ label: "Left-click your Netrunner first", icon: "fa-hand-pointer", disabled: true }], report);
         }
         if (active.id === token.id)
-            return isIce(token) ? this.iceSelfMenu(event, token, report) : this.runnerSelfMenu(event, token, report);
+            return isIce(token) ? this.iceSelfMenu(event, token, report) : isNpcRunner(token) ? this.npcSelfMenu(event, token, report) : this.runnerSelfMenu(event, token, report);
         if (isRunnerToken(active) && isIce(token))
             return this.runnerIceMenu(event, active, token, report);
-        if (isRunnerToken(active) && isRunnerToken(token))
+        // a Netrunner against another one – also against an NPC Netrunner of the architecture
+        if (isRunnerToken(active) && actsAsRunner(token))
             return this.runnerRunnerMenu(event, active, token, report);
+        // GM: an NPC Netrunner against a jacked-in Netrunner – Watcher search (Going Quiet) and runner-vs-runner attacks
+        if (isNpcRunner(active) && isRunnerToken(token))
+            return this.npcRunnerMenu(event, active, token, report);
         if (isIce(active) && isRunnerToken(token))
             return this.iceRunnerMenu(event, active, token, report);
         const items = [{ label: `${active.name} can't act against ${token.name}`, icon: "fa-ban", disabled: true }];
@@ -1526,6 +1666,9 @@ class NetView extends Application {
                 items.push({ label: action.label, icon: action.icon, title: action.hint, run: () => runNetAction(token, action.id, { label, tile, ice }) });
         }
         items.push(...RUNNER_ACTIONS.map(action => ({ label: action.label, icon: action.icon, title: action.hint, run: () => runNetAction(token, action.id, { label, tile, ice }) })));
+        // the own Netrunner's programs: rez / derez (1 NET Action each)
+        if (gm || token.isOwner)
+            items.push({ separator: true, label: "", icon: "" }, ...programItems(token));
         // Going Quiet – GM: set / end the stealth by hand (e.g. an alarm in meat space)
         if (gm && goingQuiet()) {
             const state = stealthOf(token);
@@ -1534,11 +1677,33 @@ class NetView extends Application {
                 : { label: "Set stealthed", icon: "fa-user-secret", title: "The Netrunner counts as stealthed (e.g. after a successful Quiet Jack In rolled at the table)", run: () => setStealth(token, "active") });
         }
         if (gm || token.isOwner)
-            items.push({ separator: true, label: "", icon: "" }, { label: "Jack Out", icon: "fa-plug-circle-xmark", run: () => this.jackOut(token) },
-                { label: "Unsafe Jack Out", icon: "fa-plug-circle-exclamation", title: "Out at once, without a NET Action (also while Superglued) – the Netrunner suffers the effect of every rezzed Black ICE it met", run: () => this.jackOut(token, true) });
+            items.push({ separator: true, label: "", icon: "" }, { label: "Jack Out", icon: "fa-plug-circle-xmark", run: () => this.jackOut(token, false, true) },
+                { label: "Unsafe Jack Out", icon: "fa-plug-circle-exclamation", title: "Out at once, without a NET Action (also while Superglued) – the Netrunner suffers the effect of every rezzed Black ICE it met", run: () => this.jackOut(token, true, true) });
         if (gm)
             items.push(this.combatItem(token), this.revealItem(token));
         this.showMenu(event, `${token.name}`, items, report, note);
+    }
+    /** GM: an NPC Netrunner of the architecture on itself – it moves like a Netrunner (left-click a floor) and stays a Watcher */
+    npcSelfMenu(event, token, report) {
+        const floor = this.floorOfToken(token);
+        const items = [...programItems(token), { separator: true, label: "", icon: "" }, this.combatItem(token), this.revealItem(token)];
+        this.showMenu(event, token.name, items, report, `NPC Netrunner (Watcher) · ${floor?.label.replace(/:.*/, "") ?? "no floor"} · left-click a floor: move it there`);
+    }
+    /** GM: the active NPC Netrunner against a jacked-in Netrunner */
+    npcRunnerMenu(event, npc, runner, report) {
+        const here = this.sameFloor(npc, runner);
+        const floor = this.floorOfToken(npc);
+        const label = floor?.label.replace(/:.*/, "") ?? "NET";
+        const why = here ? "" : `${runner.name} is not on ${npc.name}'s floor`;
+        const items = [];
+        // Going Quiet: a Watcher searches a stealthed Netrunner (Interface + Pathfinder bonus vs Interface + Cloak)
+        if (isStealthed(runner)) {
+            const search = ICE_ACTIONS.find(a => a.stat === "int");
+            items.push({ label: "Search (Watcher)", icon: search?.icon ?? "fa-magnifying-glass", title: why || search?.hint || "", disabled: !here, run: () => startIceAction(npc, runner, "int", label) });
+        }
+        items.push(...runnerAttackItems(npc, runner, label, why || (isStealthed(runner) ? `${runner.name} is stealthed – search first` : "")));
+        items.push({ separator: true, label: "", icon: "" }, this.combatItem(runner), this.revealItem(runner));
+        this.showMenu(event, `${npc.name} → ${runner.name}`, items, report, why || (isStealthed(runner) ? `${runner.name} is stealthed` : "NPC Netrunner"));
     }
     /** GM: like Foundry's "Toggle Combat State" – this token (Netrunner or ICE) in / out of the current encounter */
     combatItem(token) {
@@ -1571,7 +1736,11 @@ class NetView extends Application {
             // attacks: only this target · Slide / Speed / Evade Detection: every ICE of the floor takes part
             const target = ["zap", "sword", "banhammer"].includes(action.id) ? [iceToken] : all;
             const reaction = ["speed", "stealth"].includes(action.id);
-            items.push({ label: action.label + (reaction ? " (reaction)" : ""), icon: action.icon, title: why || action.hint, disabled: !here,
+            // Sword / Banhammer: copies left this round / installed (each copy attacks once per round)
+            const count = ["sword", "banhammer"].includes(action.id) ? attackerLeft(runner, action.id) : undefined;
+            const usedUp = !!count && count.left <= 0 && count.blocking && !gm;
+            items.push({ label: action.label + (reaction ? " (reaction)" : "") + (count ? ` ${count.left}/${count.copies}` : ""), icon: action.icon,
+                title: why || (usedUp ? `No ${action.label.replace(/ attack$/, "")} left this round – each installed copy attacks once per round` : action.hint), disabled: !here || usedUp,
                 run: () => runNetAction(runner, action.id, { label, tile, ice: target }) });
         }
         if (gm)
@@ -1626,7 +1795,8 @@ class NetView extends Application {
             items.push(this.revealItem(theTile));
         this.showMenu(event, title, items, report, note);
     }
-    async jackOut(token, unsafe = false) {
+    /** fromMenu: chosen in the right-click menu – the GM's window stays open then (the footer button closes it as before) */
+    async jackOut(token, unsafe = false, fromMenu = false) {
         if (!token)
             return;
         if (unsafe) {
@@ -1644,10 +1814,13 @@ class NetView extends Application {
             if (!await Dialog.confirm({ title: "Superglue", content: `<p>${esc(token.name)} is held by Superglue (${glue.rounds} round(s) left) – no safe Jack Out.</p><p>Jack Out anyway?</p>`, defaultYes: false }))
                 return;
         }
+        const keep = fromMenu && !!game.user?.isGM;
+        if (keep)
+            this.keepOpen = token.id;
         try {
             await sendRequest("jack-out", this.ap.uuid, { token: token.id, ...(unsafe ? { unsafe: true, reason: "Unsafe Jack Out" } : {}) });
             ui.notifications.info(`${token.name} jacked out of the NET${unsafe ? " (unsafe)" : ""}.`);
-            if (token.id === this.tokenId)
+            if (token.id === this.tokenId && !keep)
                 await this.close();
         }
         catch (error) {
@@ -1661,6 +1834,13 @@ class NetView extends Application {
 }
 /** a Netrunner token in a NET scene */
 const isRunnerToken = (t) => !!flagOf(t, RUN_FLAG);
+/** NET window: what a user sees of a token – hidden tokens only the GM; a stealthed Netrunner (Going Quiet, also while
+ *  jacking in quietly) only the GM and its owners, not the other players */
+const seenBy = (t, gm = !!game.user?.isGM) => gm || (!t.hidden && !(isRunnerToken(t) && !t.isOwner && ["active", "establishing"].includes(stealthOf(t))));
+/** an NPC Netrunner placed in the architecture (no Black ICE, no Demon, no jacked-in player token; Netrunner role or
+ *  Cyberdeck): the GM moves it like a Netrunner and acts with it – it stays a Watcher */
+const isNpcRunner = (t) => !!t?.actor && !flagOf(t, RUN_FLAG) && !isIce(t) && !t.actor.hasPlayerOwner && isNetrunner(t.actor);
+const actsAsRunner = (t) => isRunnerToken(t) || isNpcRunner(t);
 const tokenImg = (t) => String(t?.texture?.src && !String(t.texture.src).includes("*") ? t.texture.src : t?.actor?.img ?? "icons/svg/mystery-man.svg");
 /** how deep a floor lies in the architecture (number of floors before it) */
 function floorDepth(scene, floor) {
@@ -1736,10 +1916,30 @@ async function jackIn(ap) {
         return void ui.notifications.warn("This token is not an Access Point.");
     const controlled = (canvas.tokens?.controlled ?? []);
     const runner = controlled.find(t => t !== ap && t.actor?.isOwner && isNetrunner(t.actor)) ?? controlled.find(t => t !== ap && t.actor?.isOwner);
-    if (!runner)
+    if (!runner) {
+        // nothing selected, but the own Netrunner already runs here: open its window again
+        const own = !game.user?.isGM ? ownRunnerIn(ap.document) : undefined;
+        if (own)
+            return void openView(ap.document, own.id);
         return void ui.notifications.warn("Select your Netrunner token first, then right-click the Access Point.");
+    }
     if (!isNetrunner(runner.actor))
         return void ui.notifications.warn(`${runner.name} is not a Netrunner (no Netrunner role and no Cyberdeck).`);
+    // already jacked in here: the running window opens again – no second Jack In
+    const running = runningHere(ap.document, runner.document);
+    if (running) {
+        openView(ap.document, running.id);
+        return void ui.notifications.info(`${runner.name} is already jacked in – the NET window is open again.`);
+    }
+    // range to the Access Point (option: 6 m / 8 m / off)
+    const range = apRange(), distance = range ? bodyDistance(runner.document, ap.document) : undefined;
+    if (range && distance !== undefined && distance > range) {
+        const text = `${runner.name} is ${Math.round(distance * 10) / 10} m from the Access Point – out of range (${range} m).`;
+        if (!game.user?.isGM)
+            return void ui.notifications.warn(`${text} Move closer to jack in.`);
+        if (!await Dialog.confirm({ title: "Out of range", content: `<p>${esc(text)}</p><p>Jack In anyway?</p>`, defaultYes: false }))
+            return;
+    }
     // Going Quiet: Jack In normally (1 NET Action) or quietly (2 NET Actions)
     let stealth = false;
     if (goingQuiet()) {
@@ -1757,6 +1957,88 @@ async function jackIn(ap) {
     await spendNetActions(netToken, stealth ? 2 : 1);
     if (stealth)
         await quietJackIn(ap.document, tokenId);
+}
+// ---------- range to the Access Point (option "NET: Range to the Access Point") ----------
+/** the range in metres, or null when the option is off */
+function apRange() {
+    try {
+        const value = String(game.settings.get(MODULE, "netApRange") ?? "6");
+        return value === "off" ? null : Number(value) || null;
+    }
+    catch {
+        return null;
+    }
+}
+/** distance (scene units, metres in CPR) between two tokens of the same scene, centre to centre */
+function bodyDistance(a, b) {
+    const scene = a?.parent;
+    if (!scene || scene !== b?.parent)
+        return undefined;
+    const size = scene.grid?.size || scene.dimensions?.size || 100, unit = Number(scene.grid?.distance ?? scene.dimensions?.distance) || 2;
+    const centre = (t) => ({ x: t.x + (t.width || 1) * size / 2, y: t.y + (t.height || 1) * size / 2 });
+    const p = centre(a), q = centre(b);
+    if (canvas?.scene?.id === scene.id && canvas.grid?.measurePath) {
+        try {
+            return canvas.grid.measurePath([p, q]).distance;
+        }
+        catch { /* fall through */ }
+    }
+    // square grid, every diagonal one square (Foundry's default)
+    return Math.max(Math.abs(p.x - q.x), Math.abs(p.y - q.y)) / size * unit;
+}
+/** primary GM: the body of a jacked-in Netrunner moved – leaving the range posts the "Out of range" card once
+ *  (again only after it was back in range) */
+async function checkRange(body) {
+    const range = apRange();
+    if (!range || !game.user?.isGM || primaryGM()?.id !== game.user?.id)
+        return;
+    for (const scene of game.scenes ?? [])
+        for (const t of scene.tokens ?? []) {
+            if (flagOf(t, `${RUN_FLAG}.source`) !== body.uuid)
+                continue;
+            const ap = fromUuidSync(flagOf(t, `${RUN_FLAG}.accessPoint`) ?? "");
+            const distance = ap ? bodyDistance(body, ap) : undefined;
+            if (distance === undefined)
+                continue;
+            const out = distance > range, was = !!flagOf(t, `${RUN_FLAG}.outOfRange`);
+            if (out === was)
+                continue;
+            await t.update({ [`flags.${MODULE}.${RUN_FLAG}.outOfRange`]: out });
+            if (out)
+                await ChatMessage.create({
+                    speaker: ChatMessage.getSpeaker({ token: body }),
+                    whisper: Array.from(game.users ?? []).filter(u => u.isGM).map(u => u.id),
+                    content: `<section class="cprnet-range-card"><h3><i class="fas fa-satellite-dish"></i> Out of range</h3>
+                        <p>${esc(body.name)} is ${Math.round(distance * 10) / 10} m from the Access Point (range ${range} m) – the connection to ${esc(t.name)} in the NET breaks.</p>
+                        <button type="button" data-net-button data-cprnet-range-unsafe data-ap="${esc(ap.uuid)}" data-token="${t.id}"><i class="fas fa-plug-circle-xmark"></i> Unsafe Jack Out</button></section>`,
+                    flags: { [MODULE]: { rangeCard: true } },
+                });
+        }
+}
+/** GM: "Unsafe Jack Out" on the "Out of range" card */
+async function rangeUnsafe(button) {
+    const ap = fromUuidSync(button.dataset.ap ?? ""), data = accessPointData(ap);
+    const token = data ? game.scenes?.get(data.scene)?.tokens?.get(button.dataset.token ?? "") : undefined;
+    if (!token)
+        return void ui.notifications.info("That Netrunner is no longer in the NET.");
+    const met = iceMetOnCards(token);
+    if (!await Dialog.confirm({ title: "Unsafe Jack Out", defaultYes: true,
+        content: `<p>Jack ${esc(token.name)} out <strong>unsafely</strong> (out of range)?</p><p>${met.length ? `The Netrunner suffers the effect of every rezzed Black ICE it met: ${met.map(t => esc(t.name)).join(", ")}.` : "No rezzed Black ICE met – no effects."}</p>` }))
+        return;
+    button.disabled = true;
+    await sendRequest("jack-out", ap.uuid, { token: token.id, unsafe: true, reason: "Out of range" });
+    ui.notifications.info(`${token.name} jacked out of the NET (unsafe – out of range).`);
+}
+/** the NET token of this meat-space Netrunner that came in through this Access Point (still in the architecture) */
+function runningHere(apDoc, source) {
+    const scene = game.scenes?.get(accessPointData(apDoc)?.scene ?? "");
+    const t = scene && source ? netToken(scene, source.uuid, source.actorLink ? source.actorId : undefined) : undefined;
+    return t && flagOf(t, `${RUN_FLAG}.accessPoint`) === apDoc.uuid ? t : undefined;
+}
+/** a player's own Netrunner running in the architecture of this Access Point */
+function ownRunnerIn(apDoc) {
+    const scene = game.scenes?.get(accessPointData(apDoc)?.scene ?? "");
+    return Array.from(scene?.tokens ?? []).find(t => flagOf(t, RUN_FLAG) && t.isOwner && !isIce(t));
 }
 function chooseJackInMode(name) {
     return new Promise(resolve => new Dialog({
@@ -1901,7 +2183,8 @@ function decorateHUD(hud, html) {
         if (game.user?.isGM && isIce(token) && floorList(token.document.parent).length) {
             column.append(icon("ice-left", "fa-arrow-left", "Move one floor left"), icon("ice-right", "fa-arrow-right", "Move one floor right"));
         }
-        if (ap && game.user?.isGM)
+        // GM: always · a player: while his Netrunner runs in this architecture (opens the running window again)
+        if (ap && (game.user?.isGM || ownRunnerIn(token.document)))
             column.append(icon("view", "fa-eye", "Open NET view"));
         if (game.user?.isGM && !isIce(token))
             column.append(icon("configure", "fa-plug", ap ? "Access Point settings" : "Make Access Point"));
@@ -1945,6 +2228,39 @@ export function registerAccessPoints() {
         hint: "Play NET architectures with the stealth rules of the Going Quiet DLC: Jack In normally or quietly (Stealth, 2 NET Actions), Evade Detection instead of Speed checks, Watchers can search, a Control Node breaks stealth.",
         scope: "world", config: true, type: Boolean, default: false, onChange: () => redrawScene(),
     });
+    game.settings.register(MODULE, "netCountOnlyInCombat", {
+        name: "NET: count only in combat",
+        hint: "NET Actions and Sword / Banhammer uses are only counted while the Netrunner (its NET token or its body) is in a started combat. Off: they are always counted and go back to 0 every new round. Blocking when used up happens only in combat either way.",
+        scope: "world", config: true, type: Boolean, default: true,
+    });
+    game.settings.register(MODULE, "netApRange", {
+        name: "NET: Range to the Access Point",
+        hint: "How far the Netrunner's body may be from the Access Point. Farther away: no Jack In (the GM may confirm anyway), and when the body leaves the range during a run, the GM gets an \"Out of range\" card with \"Unsafe Jack Out\". Off: the distance plays no role at all.",
+        scope: "world", config: true, type: String, default: "6", choices: { off: "Off – range plays no role", "6": "6 m", "8": "8 m" },
+    });
+    game.settings.register(MODULE, "netStealthCardsPrivate", {
+        name: "NET: Going Quiet – stealth cards only for the Netrunner's owners",
+        hint: "Quiet Jack In, Evade Detection and a Watcher's search for a stealthed Netrunner: the chat card (and its dice) is shown only to the GM and the owners of that Netrunner – for every other player it is an enemy Netrunner sneaking around.",
+        scope: "world", config: true, type: Boolean, default: true, onChange: () => ui.chat?.render?.(),
+    });
+    game.settings.register(MODULE, "netQuietHidden", {
+        name: "NET: Going Quiet – GM rolls hidden",
+        hint: "Quiet Jack In, Evade Detection and Watcher searches: the players do not see which Watchers check, nor the GM's rolls (Black ICE PER, Watcher Interface) – no numbers, no 3D dice. They see their own roll and whether they stay undetected.",
+        scope: "world", config: true, type: Boolean, default: true, onChange: () => ui.chat?.render?.(),
+    });
+    // range to the Access Point: the Netrunner's body moves
+    Hooks.on("updateToken", (doc, changes) => {
+        if (("x" in (changes ?? {}) || "y" in (changes ?? {})) && !flagOf(doc, RUN_FLAG))
+            void checkRange(doc).catch(error => console.error(MODULE, "range", error));
+    });
+    Hooks.on("renderChatMessage", (message, html) => {
+        const root = html?.[0] ?? html;
+        root?.querySelectorAll?.("[data-cprnet-range-unsafe]").forEach(button => {
+            if (!game.user?.isGM)
+                return button.remove();
+            button.addEventListener("click", () => void rangeUnsafe(button).catch(error => ui.notifications.error(error.message)));
+        });
+    });
     for (const hook of ["createChatMessage", "updateChatMessage"])
         Hooks.on(hook, (message) => { void syncStealth(message).catch(error => console.error(MODULE, "Going Quiet", error)); });
     // GM-Edit: the journal of the "Netrunning" button in the NET view (right-click on it to change; empty = default page)
@@ -1980,6 +2296,9 @@ export function registerAccessPoints() {
                 const u = {}, penalty = netActionsPenaltyOf(t), glue = glueOf(t);
                 if (netActionsOf(t) > 0)
                     u[`flags.${MODULE}.${ACTIONS_FLAG}`] = 0;
+                // Sword / Banhammer: every copy can attack again
+                if (foundry.utils.getProperty(t, `flags.${MODULE}.${ATTACK_USES_FLAG}`))
+                    u[`flags.${MODULE}.-=${ATTACK_USES_FLAG}`] = null;
                 if (penalty.active || penalty.pending)
                     u[`flags.${MODULE}.${PENALTY_FLAG}`] = { active: Number(penalty.pending ?? 0) || 0, pending: 0 };
                 if (glue)
@@ -2012,11 +2331,15 @@ export function registerAccessPoints() {
     });
     Hooks.on("updateActor", (actor) => { if (["blackIce", "demon"].includes(String(actor?.type)))
         redrawScene(); });
+    // programs rezzed / derezzed: the hover text of NPC Netrunners follows
+    for (const hook of ["updateItem", "createItem", "deleteItem"])
+        Hooks.on(hook, (item) => { if (String(item?.type) === "program")
+            redrawScene(); });
     Hooks.on("renderTokenHUD", (hud, html) => decorateHUD(hud, html));
     for (const hook of ["createToken", "updateToken", "deleteToken", "createTile", "updateTile", "deleteTile", "createDrawing", "updateDrawing", "deleteDrawing", "updateRegion", "updateScene"])
         Hooks.on(hook, (doc) => { redrawScene(doc?.parent?.id ?? doc?.id); if (hook === "updateToken")
             refreshAccessPoint(doc); });
-    Hooks.on("deleteToken", (doc) => { const view = views.get(doc.id); if (view)
+    Hooks.on("deleteToken", (doc) => { const view = views.get(doc.id); if (view && view.keepOpen !== doc.id) // GM jacked it out from the menu: stays open
         void view.close();
         // a window whose active token left the architecture: nobody is active any more
         for (const v of views.values())

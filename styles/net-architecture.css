@@ -1,4 +1,4 @@
-/* NET Architecture v1.5.12 */
+/* NET Architecture v1.5.13 */
 :root {
   --cprnet-panel-background: rgba(12, 14, 18, 0.78);
   --cprnet-panel-color: #eeeeee;
@@ -457,3 +457,24 @@
 .cprnet-netview .cprnet-netview-sep { width: 1px; align-self: stretch; margin: 2px 2px; background: #2b5560; }
 .cprnet-netview .cprnet-netview-row.is-gm { height: 26px; min-height: 26px; } /* exactly GM_ROW (26 + 4 gap) – the players' window is lower by that */
 .cprnet-netview .cprnet-netview-menu { z-index: 20; } /* v1.5.12: above the "Keys control the NET" note and the focus frame */
+/* v1.6.0 / v1.7.3: Programs dropdown in the token menu (rez / derez, 1 NET Action each) – the toggle is a normal menu button */
+.cprnet-netview .cprnet-netview-menu .cprnet-netview-menu-dropdown { display: flex; flex-direction: column; gap: 3px; }
+.cprnet-netview .cprnet-netview-menu .cprnet-netview-menu-dropdown-toggle { display: flex; align-items: center; gap: 4px; }
+.cprnet-netview .cprnet-netview-menu .cprnet-netview-menu-dropdown-toggle > span { flex: 1; }
+.cprnet-netview .cprnet-netview-menu .cprnet-dropdown-caret { opacity: .7; transition: transform .15s; }
+.cprnet-netview .cprnet-netview-menu .cprnet-netview-menu-dropdown.is-open .cprnet-dropdown-caret { transform: rotate(90deg); }
+.cprnet-netview .cprnet-netview-menu .cprnet-netview-menu-dropdown-list { display: flex; flex-direction: column; gap: 3px; }
+.cprnet-netview .cprnet-netview-menu .cprnet-netview-menu-dropdown-list[hidden] { display: none; }
+.cprnet-netview .cprnet-netview-menu .cprnet-netview-menu-dropdown-list > button { margin-left: 10px; display: flex; align-items: baseline; gap: 6px; }
+.cprnet-netview .cprnet-netview-menu .cprnet-netview-menu-dropdown-list > button small { margin-left: auto; padding: 0; white-space: nowrap; }
+.cprnet-netview .cprnet-netview-menu .cprnet-program-row { margin-left: 10px; display: flex; align-items: baseline; gap: 6px; }
+.cprnet-netview .cprnet-netview-menu .cprnet-program-row > i { flex: none; }
+.cprnet-netview .cprnet-netview-menu .cprnet-program-row small { margin-left: auto; padding: 0; white-space: nowrap; }
+.cprnet-netview .cprnet-netview-menu .cprnet-program-row[aria-disabled="true"] { opacity: .45; cursor: not-allowed; }
+/* v1.7.5 / v1.7.6: the row rezzes / derezzes, only the program's name is a link (like the Readouts of Combat HUD dX) */
+.cprnet-netview .cprnet-netview-menu .cprnet-program-name { cursor: pointer; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cprnet-netview .cprnet-netview-menu .cprnet-program-name:hover, .cprnet-netview .cprnet-netview-menu .cprnet-program-name:focus-visible { color: #64f1df; text-decoration: underline; outline: none; }
+/* v1.7.0: "Out of range" card (range to the Access Point) */
+.cprnet-range-card h3 { margin: 0 0 4px; font-size: 14px; border: 0; }
+.cprnet-range-card h3 i { color: #ff6400; }
+.cprnet-range-card p { margin: 0 0 6px; }

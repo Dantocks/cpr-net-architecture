@@ -560,7 +560,10 @@ export function iceMetOnCards(token) {
             if (row.ice?.token)
                 ids.add(row.ice.token);
     }
-    return [...ids].map(id => token.parent.tokens.get(id)).filter(t => {
+    // Going Quiet (p. 4): Black ICE the Netrunner slipped past with Evade Detection is not "encountered" –
+    // as long as the stealth was not broken afterwards
+    const seen = isStealthed(token) ? (foundry.utils.getProperty(token, `flags.${MODULE}.netrun.stealthSeen`) ?? {}) : {};
+    return [...ids].filter(id => !seen[id]).map(id => token.parent.tokens.get(id)).filter(t => {
         if (!t?.actor || String(t.actor.type) !== "blackIce")
             return false;
         const path = damageTarget(t.actor, true);

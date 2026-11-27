@@ -3,6 +3,34 @@
  * Access Points, Jack In / Jack Out, the NET window with floors, branches, passages, Black ICE and Demons,
  * NET actions with chat cards, Going Quiet. Works without Pneuma's Combat Tools.
  * v1.0.1: right-click on an Access Point keeps your selected Netrunner (as in the Combat Tools).
+ * v1.8.1: option "NET: count only in combat" (on): NET Actions and Sword / Banhammer uses are only counted while the
+ *   Netrunner (NET token or body) is in a started combat – another combat somewhere else no longer counts. Blocking when
+ *   used up: only in the Netrunner's combat.
+ * v1.8.0: Sword / Banhammer: counter in the button (copies left this round / installed) – each installed copy attacks once
+ *   per round (CP:R p. 200), back to full every new round; used up: players can't attack, the GM may confirm. Cancelling a
+ *   card in the same round gives its NET Action and its Sword / Banhammer use back.
+ * v1.7.6: Programs dropdown: the whole row rezzes / derezzes, only the name opens the program.
+ * v1.7.5: Programs dropdown: only the program's name is a link (hover: cyan, underlined) – opens the program.
+ * v1.7.4: Programs dropdown: the switch on the left rezzes / derezzes, a click on the name opens the program.
+ * v1.7.3: the "Programs" toggle in the token menu looks like the other menu buttons.
+ * v1.7.2: stealthed Netrunners stand at the left / right edge of a floor; visible ones only count the visible ones for
+ *   their spot – a visible Netrunner's position no longer gives a hidden one away.
+ * v1.7.1: option "Going Quiet – stealth cards only for the Netrunner's owners" (on): Quiet Jack In, Evade Detection
+ *   and a Watcher's search are hidden (with their dice) from every player who does not own the stealthed Netrunner.
+ * v1.7.0: option "NET: Range to the Access Point" (6 m / 8 m / off): no Jack In out of range (the GM may confirm
+ *   anyway); the body leaving the range during a run gives the GM an "Out of range" card with "Unsafe Jack Out".
+ * v1.6.3: right-click menu moves back inside the NET window when the Programs dropdown opens (was cut off at the bottom).
+ * v1.6.2: Programs dropdown stays open after a click – the entry shows its new state (and the count in the header).
+ * v1.6.1: NET window: a stealthed Netrunner (also while jacking in quietly) is only shown to the GM and its owners –
+ *   the other players don't see it.
+ * v1.6.0: Going Quiet – option "GM rolls hidden" (on): Watcher names and the GM's counter-rolls (Black ICE PER, Watcher
+ *   Interface) only for the GM, no 3D dice for players; NPC Netrunner Interface from the NET role rank; Watchers get the
+ *   Pathfinder bonus; Unsafe Jack Out ignores Black ICE slipped past with Evade Detection (while still stealthed).
+ *   NPC Netrunners in the architecture: GM moves / searches / runner vs runner. Player NET moves go through the GM's
+ *   client. Access Point: eye icon for players, Jack In again reopens the window. Programs dropdown (rez / derez,
+ *   1 NET Action; sheet changes by players count too), all programs derezzed at Jack In, NPC Netrunner hover text.
+ * v1.5.13: GM: "Jack Out" / "Unsafe Jack Out" from the right-click menu keep the NET window open (the footer button still
+ *   closes it).
  * v1.5.12: the right-click menu lies above the "Keys control the NET" note.
  * v1.5.11: performance – the NET window redraws once per frame instead of once per changed document (Reveal
  *   everything, Reset Net Arch …), and only rebuilds tiles / tokens when something in them changed.
@@ -47,6 +75,7 @@
 import { MODULE } from "./support.js";
 import { registerAccessPoints, isAccessPoint } from "./access-point.js";
 import { registerNetActions } from "./net-actions.js";
+import { registerPrograms } from "./programs.js";
 import { registerChatButtons } from "./chat-buttons.js";
 import { registerLook } from "./look.js";
 
@@ -65,6 +94,7 @@ Hooks.once("init", () => {
     }
     registerAccessPoints();
     registerNetActions();
+    registerPrograms();
     registerChatButtons();
     registerLook();
     // Right-click on an Access Point works like in Pneuma's Combat Tools: the menu opens WITHOUT selecting the

@@ -9,7 +9,7 @@
 // Black ICE / Demons (GM, right-click the Netrunner): ATK (exchange – the Netrunner evades with Speed or not),
 // SPD (lying in wait – the Netrunner rolls Speed) and PER (the Netrunner rolls Slide).
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { primaryGM, canSpendNetActions, spendNetActions } from "./support.js";
+import { primaryGM, canSpendNetActions, spendNetActions, ACTIONS_FLAG, combatOf, countsNow } from "./support.js";
 import { applyRvrPatch, decorateRvr, decorateTick, rvrSummaryEntries, rvrUndo, burnTick, TICK_FLAG, applyUnsafePatch, decorateUnsafe, unsafeSummaryRows } from "./runner-combat.js";
 import { diceJSON, nativeCard, nativeDiceHandlerURL, rollHidden, showSavedDice, rollOutcomeClass, attackHeading, applyCombatStatus } from "./support.js";
 const MODULE = "cpr-net-architecture";
@@ -29,6 +29,44 @@ export const goingQuiet = () => { try {
 catch {
     return false;
 } };
+/** world setting: Going Quiet checks – the GM's rolls and the Watchers' names are kept from the players */
+export const quietHidden = () => { try {
+    return goingQuiet() && game.settings?.get(MODULE, "netQuietHidden") !== false;
+}
+catch {
+    return false;
+} };
+/** a Going Quiet card whose GM side is hidden from the players */
+const hiddenCard = (s) => !!s && quietHidden() && (s.action === "quietjack" || s.action === "stealth" || (s.type === "ice-vs-runner" && s.action === "int"));
+/** world setting: Going Quiet cards (Quiet Jack In, Evade Detection, a Watcher's search) only for the GM and the owners
+ *  of the stealthed Netrunner – for everyone else it is an enemy Netrunner sneaking around */
+const stealthPrivate = (s) => { try {
+    return !!s && goingQuiet() && game.settings?.get(MODULE, "netStealthCardsPrivate") !== false
+        && (s.action === "quietjack" || s.action === "stealth" || (s.type === "ice-vs-runner" && s.action === "int"));
+}
+catch {
+    return false;
+} };
+/** non-GM users who own the Netrunner's actor (kept on the card – the NET token is gone after the Jack Out) */
+const ownerIds = (actor) => Array.from(game.users ?? []).filter(u => !u.isGM && actor?.testUserPermission?.(u, "OWNER")).map(u => u.id);
+/** may this user see a private stealth card? */
+function seesStealthCard(s) {
+    if (game.user?.isGM)
+        return true;
+    const token = game.scenes?.get(s.scene)?.tokens?.get(s.runner?.token ?? "");
+    return token ? !!token.isOwner : (s.owners ?? []).includes(game.user?.id);
+}
+/** the dice of a private stealth card: only the GMs and the Netrunner's owners see them */
+function stealthAudience(s) {
+    const token = game.scenes?.get(s.scene)?.tokens?.get(s.runner?.token ?? "");
+    const owners = token ? ownerIds(token.actor) : (s.owners ?? []);
+    return { whisper: [...Array.from(game.users ?? []).filter(u => u.isGM).map(u => u.id), ...owners], blind: false };
+}
+/** GM-only / player-only parts of a card (removed on the other clients when the card is drawn) */
+const gmOnly = (html, tag = "div") => `<${tag} class="cprnet-gm-only">${html}</${tag}>`;
+const playerOnly = (html, tag = "div") => `<${tag} class="cprnet-player-only">${html}</${tag}>`;
+/** a name the players must not see: the GM gets it, the players a neutral word */
+const secretName = (name, neutral) => gmOnly(esc(name), "span") + playerOnly(esc(neutral), "span");
 /** the stealth state of a Netrunner token in a NET architecture (only with Going Quiet on) */
 export const stealthOf = (token) => goingQuiet() ? (foundry.utils.getProperty(token, `flags.${MODULE}.netrun.stealth`) ?? undefined) : undefined;
 export const isStealthed = (token) => stealthOf(token) === "active";
@@ -62,6 +100,25 @@ export function swordOf(actor) {
 export function banhammerOf(actor) {
     const programs = (actor?.itemTypes?.program ?? Array.from(actor?.items ?? []).filter((i) => String(i.type) === "program"));
     return programs.find(p => /\bban\s*-?hammer\b/i.test(String(p.name)) && (p.system?.isInstalled || p.system?.isRezzed || p.system?.isInstalledInActor));
+}
+// ---------- Sword / Banhammer: each installed copy attacks once per round (CP:R p. 200) ----------
+/** Attacker programs deactivate right after use, and every copy on the Cyberdeck can be activated once per meatspace
+ *  round – so the counter is: installed copies minus the ones used this round (only counted while a combat runs) */
+export const ATTACK_USES_FLAG = "attackUses";
+const ATTACKER_NAME = { sword: /\bsword\b/i, banhammer: /\bban\s*-?hammer\b/i };
+/** the number of installed copies of Sword / Banhammer */
+export function attackerCopies(actor, id) {
+    const programs = (actor?.itemTypes?.program ?? Array.from(actor?.items ?? []).filter((i) => String(i.type) === "program"));
+    return programs.filter(p => ATTACKER_NAME[id]?.test(String(p.name)) && (p.system?.isInstalled || p.system?.isRezzed || p.system?.isInstalledInActor)).length;
+}
+/** the round a Netrunner's counters belong to (its combat; none: null) */
+const roundKey = (token) => { const c = combatOf(token); return c ? `${c.id}:${c.round}` : null; };
+const usesOf = (token, id) => Math.max(0, Number(foundry.utils.getProperty(token, `flags.${MODULE}.${ATTACK_USES_FLAG}.${id}`) ?? 0) || 0);
+/** copies left this round (counted only in combat – unless the option "count only in combat" is off) */
+export function attackerLeft(token, id) {
+    const copies = attackerCopies(token?.actor, id);
+    // out of combat (option on) nothing is counted – an old count from an earlier fight does not show either
+    return { copies, left: countsNow(token) ? Math.max(0, copies - usesOf(token, id)) : copies, blocking: !!combatOf(token) };
 }
 /** Zap, Sword and Banhammer: attacks on a Black ICE / Demon's REZ */
 const rezAttack = (action) => action === "zap" || action === "sword" || action === "banhammer";
@@ -289,7 +346,36 @@ const usesInterface = (actor, stat) => stat === "int" || (isDemon(actor) && (sta
 const statLabel = (stat, actor) => usesInterface(actor, stat) ? "Interface" : STAT_LABEL[stat];
 /** the actor behind a card side (Black ICE / Demon token in the NET scene) */
 const sideActor = (s, side) => side ? (game.scenes?.get(s.scene)?.tokens?.get(side.token))?.actor : undefined;
+/** a Netrunner's Interface: the rank of the active NET role (otherwise a role named Netrunner) – NPC Netrunners too */
+export function netrunnerRank(actor) {
+    const roles = actor?.itemTypes?.role ?? Array.from(actor?.items ?? []).filter(i => String(i.type) === "role");
+    const role = roles.find(r => r.id === actor?.system?.roleInfo?.activeNetRole) ?? roles.find(r => /netrunner/i.test(String(r.name)));
+    const rank = Number(role?.system?.rank);
+    return Number.isFinite(rank) && rank > 0 ? rank : null;
+}
+/** a Netrunner-like actor (enemy / NPC Netrunner): not Black ICE, not a Demon, with an Interface rank */
+export const isNetrunnerActor = (actor) => !!actor && String(actor.type) !== "blackIce" && !isDemon(actor) && netrunnerRank(actor) !== null;
+/** Going Quiet: "+ any bonus to Pathfinder Checks" of a Watcher – rezzed Pathfinder boosters (See Ya +2, or what the
+ *  program states in its modifiers) */
+export function pathfinderBonus(actor) {
+    const mods = [];
+    for (const p of Array.from(actor?.items ?? [])) {
+        if (String(p.type) !== "program" || !p.system?.isRezzed)
+            continue;
+        const own = numberAt(p, ["system.modifiers.pathfinder", "system.modifiers.Pathfinder", "system.bonuses.pathfinder"]);
+        const value = own ?? (/\bsee\s*-?\s*ya\b/i.test(String(p.name)) ? 2 : null);
+        if (value)
+            mods.push({ value, source: p.name });
+    }
+    return mods;
+}
 function iceValue(actor, stat) {
+    // an enemy (NPC) Netrunner: Interface is the rank of its NET role
+    if (stat === "int" && actor && String(actor.type) !== "blackIce" && !isDemon(actor)) {
+        const rank = netrunnerRank(actor);
+        if (rank !== null)
+            return rank;
+    }
     const names = usesInterface(actor, stat) ? ["interface"] : [stat, { atk: "attack", per: "perception", spd: "speed", def: "defense" }[stat]];
     return numberAt(actor, names.flatMap(n => [`system.stats.${n}`, `system.${n}`]));
 }
@@ -313,14 +399,17 @@ async function askNumber(title, label, value) {
         close: () => resolve(null),
     }).render(true));
 }
-async function iceRoll(ice, stat, edit = false) {
+async function iceRoll(ice, stat, edit = false, pathfinder = true) {
     let value = iceValue(ice.actor, stat);
     const label = statLabel(stat, ice.actor);
     if (value === null || edit)
         value = await askNumber(`${ice.name} — ${label}`, label, value);
     if (value === null || !Number.isFinite(value))
         return;
-    return statRoll(`${ice.name} · ${label}`, value);
+    // Going Quiet: a Watcher's Interface check gets its Pathfinder bonus (vs a stealthed Netrunner, and its search)
+    // (not at a Quiet Jack In: that is a plain Interface vs Interface check)
+    const mods = stat === "int" && pathfinder ? pathfinderBonus(ice.actor) : [];
+    return statRoll(`${ice.name} · ${label}`, value, mods);
 }
 const isMulti = (s) => s.type === "runner-vs-ice" && !!s.rows;
 const sideImg = (token) => String(token?.texture?.src && !String(token.texture.src).includes("*") ? token.texture.src : token?.actor?.img ?? "icons/svg/mystery-man.svg");
@@ -400,10 +489,12 @@ function cardHTML(s) {
         const runnerWins = s.outcome === "runner";
         const runnerSection = s.runnerRoll ? section("evade", s.type === "ice-vs-runner" ? NET_ACTIONS[RESPONSE[s.action].runner].label : NET_ACTIONS[s.action].label, s.runnerRoll.html, (s.type === "runner-vs-ice" ? "cprnet-net-same-title " : "") + "cprnet-defense-result " + rollOutcomeClass(runnerWins))
             : section("evade", "Evasion", `<p class="cprnet-pending-status">${esc(s.runner.name)} does not evade</p>`, "cprnet-defense-result " + rollOutcomeClass(false));
-        const iceSection = section("attack", s.type === "ice-vs-runner" ? statLabel(s.action, sideActor(s, s.ice)) : `${s.ice?.name} · ${statLabel(NET_ACTIONS[s.action].versus, sideActor(s, s.ice))}`, s.iceRoll?.html ?? "", "cprnet-attack-result " + rollOutcomeClass(!runnerWins));
+        const iceSection0 = section("attack", s.type === "ice-vs-runner" ? statLabel(s.action, sideActor(s, s.ice)) : `${s.ice?.name} · ${statLabel(NET_ACTIONS[s.action].versus, sideActor(s, s.ice))}`, s.iceRoll?.html ?? "", "cprnet-attack-result " + rollOutcomeClass(!runnerWins));
+        // Going Quiet, hidden: the Watcher's search roll only for the GM
+        const iceSection = hiddenCard(s) ? gmOnly(iceSection0) : iceSection0;
         let summary = "";
         if (s.type === "ice-vs-runner" && s.action === "int")
-            summary = runnerWins ? `${esc(s.runner.name)} <span class="cprnet-hit">stays hidden</span>` : `${esc(s.ice?.name)} <span class="cprnet-miss">finds</span> ${esc(s.runner.name)}`;
+            summary = runnerWins ? `${esc(s.runner.name)} <span class="cprnet-hit">stays hidden</span>` : `${hiddenCard(s) ? secretName(s.ice?.name ?? "", "A Watcher") : esc(s.ice?.name)} <span class="cprnet-miss">finds</span> ${esc(s.runner.name)}`;
         else if (s.type === "ice-vs-runner" && s.action === "atk")
             summary = `${esc(s.ice?.name)} <span class="${runnerWins ? "cprnet-miss" : "cprnet-hit"}">${runnerWins ? "misses" : "hits"}</span> ${esc(s.runner.name)}`;
         else if (s.type === "ice-vs-runner" && s.action === "per")
@@ -466,13 +557,25 @@ function bystanders(s) {
 function multiBody(s) {
     const action = NET_ACTIONS[s.action];
     const quiet = s.action === "quietjack", stealth = s.action === "stealth";
+    const hidden = hiddenCard(s);
+    // hidden: a Watcher's name only for the GM (Black ICE met on the floor are seen anyway)
+    const rowSecret = (row) => hidden && (quiet || isWatcher(sideActor(s, row.ice)));
+    const rowName = (row) => rowSecret(row) ? secretName(row.ice.name, "A Watcher") : esc(row.ice.name);
+    const opponents = (rows) => {
+        const open = rows.filter(r => !rowSecret(r)).map(r => esc(r.ice.name)), secret = rows.filter(rowSecret);
+        const all = rows.map(r => esc(r.ice.name)).join(", ");
+        if (!secret.length)
+            return all;
+        const neutral = [...open, `${secret.length} Watcher${secret.length > 1 ? "s" : ""}`].join(", ");
+        return gmOnly(all, "span") + playerOnly(neutral, "span");
+    };
     if (s.action === "ambush")
         return ambushBody(s);
     let html = s.runnerRoll ? section("attack", action.label, s.runnerRoll.html, "cprnet-net-same-title cprnet-attack-result")
         // Quiet Jack In without any Watcher: nothing to roll
         : quiet && !s.rows.length ? section("pending", action.label, `<p class="cprnet-pending-status">No Watcher in the architecture – no check needed.</p>`)
             // Going Quiet cards are posted before the Netrunner has rolled
-            : section("pending", action.label, `<p class="cprnet-pending-status">${quiet ? "Jacking In quietly" : "Stealthed"}: waiting for ${esc(s.runner.name)}'s ${quiet ? "Interface" : "Interface + Cloak"} check${s.rows.length ? ` vs ${s.rows.map(r => esc(r.ice.name)).join(", ")}` : ""}</p><div class="cprnet-net-controls cprnet-defense-controls" data-net-runner-roll></div>`);
+            : section("pending", action.label, `<p class="cprnet-pending-status">${quiet ? "Jacking In quietly" : "Stealthed"}: waiting for ${esc(s.runner.name)}'s ${quiet ? "Interface" : "Interface + Cloak"} check${s.rows.length ? ` vs ${opponents(s.rows)}` : ""}</p><div class="cprnet-net-controls cprnet-defense-controls" data-net-runner-roll></div>`);
     s.rows.forEach((row, i) => {
         if (row.follows) {
             html += section("result", "Result", `<p class="cprnet-combat-outcome"><i class="fas fa-network-wired cprnet-net-result-icon" aria-hidden="true"></i><strong class="cprnet-result-summary">${esc(row.ice.name)} <span class="cprnet-miss">follows</span> ${esc(s.runner.name)}</strong></p>`, "cprnet-net-row");
@@ -485,7 +588,7 @@ function multiBody(s) {
         const summary = s.action === "slide"
             ? (runnerWins ? `${esc(s.runner.name)} <span class="cprnet-hit">slides away</span> from ${esc(row.ice.name)}` : `${esc(row.ice.name)} <span class="cprnet-miss">follows</span> ${esc(s.runner.name)}`)
             : quiet || stealth
-                ? (runnerWins ? `${esc(row.ice.name)} <span class="cprnet-hit">does not notice</span> ${esc(s.runner.name)}` : `${esc(row.ice.name)} <span class="cprnet-miss">detects</span> ${esc(s.runner.name)}`)
+                ? (runnerWins ? `${rowName(row)} <span class="cprnet-hit">does not notice</span> ${esc(s.runner.name)}` : `${rowName(row)} <span class="cprnet-miss">detects</span> ${esc(s.runner.name)}`)
                 : (runnerWins ? `${esc(row.ice.name)} is <span class="cprnet-hit">unsuccessful</span>` : `${esc(row.ice.name)} is <span class="cprnet-miss">successful</span>`);
         const note = s.action === "speed" ? (runnerWins ? "Black ICE unsuccessful: go on (Slide away) or fight it." : row.effect || "Black ICE successful: 1. suffer its Effect · 2. placed on top of the Initiative · 3. it will fight you.")
             : stealth && !watcher ? (runnerWins ? "Unaware: it does not enter the Initiative Queue – stealth is maintained." : `Stealth broken: ${row.effect || "suffer its Effect"} · it jumps to the top of the Initiative Queue.`)
@@ -494,14 +597,18 @@ function multiBody(s) {
         const applied = appliedHTML(row.applied, false) + burnHTML(row.burn);
         const damage = row.damage ? `<div class="cprnet-net-dmg"><span>Damage (${esc(row.damage.formula ?? "")})</span><strong>${row.damage.total}</strong></div>${applied}<div class="cprnet-damage-application"><div class="cprnet-net-controls cprnet-damage-controls" data-net-row-apply="${i}"></div></div>` : "";
         const effects = s.action !== "slide" && !quiet && !watcher; // a failed Slide: the ICE only follows – no program / Skunk effects
-        html += section("attack", `${row.ice.name} · ${statLabel(rowStat(s, row), sideActor(s, row.ice))}`, row.roll.html, "cprnet-attack-result " + rollOutcomeClass(!runnerWins))
+        const rollSection = section("attack", `${row.ice.name} · ${statLabel(rowStat(s, row), sideActor(s, row.ice))}`, row.roll.html, "cprnet-attack-result " + rollOutcomeClass(!runnerWins));
+        // hidden: the GM's roll (and the Watcher's name in its title) only for the GM
+        html += (hidden && (quiet || stealth) ? gmOnly(rollSection) : rollSection)
             + section("result", "Result", `<p class="cprnet-combat-outcome"><span class="cprnet-net-controls" data-net-row-damage="${i}"></span><i class="fas fa-network-wired cprnet-net-result-icon" aria-hidden="true"></i><strong class="cprnet-result-summary">${summary}</strong></p>`
                 + (note ? `<small class="cprnet-net-note">${esc(note)}</small>` : "") + damage, "cprnet-net-row") + (effects ? programSection(row.prog, row.progApplied, `data-net-row-prog="${i}"`) : "")
             + (effects && row.outcome === "ice" && isSkunk(sideActor(s, row.ice), row.ice.name) ? skunkSection(row.skunk, `data-net-row-skunk="${i}"`) : "");
     });
     const open = s.rows.filter(r => !r.roll && !r.follows);
     if (open.length && s.runnerRoll)
-        html += section("pending", "Opposition", `<p class="cprnet-pending-status">Waiting for the GM: ${open.map(r => `${esc(r.ice.name)} ${statLabel(rowStat(s, r), sideActor(s, r.ice))}`).join(", ")}</p><div class="cprnet-net-controls cprnet-defense-controls"></div>`);
+        html += section("pending", "Opposition", `<p class="cprnet-pending-status">Waiting for the GM: ${hidden && (quiet || stealth)
+            ? gmOnly(open.map(r => `${esc(r.ice.name)} ${statLabel(rowStat(s, r), sideActor(s, r.ice))}`).join(", "), "span") + playerOnly(`${open.length} hidden check${open.length > 1 ? "s" : ""}`, "span")
+            : open.map(r => `${esc(r.ice.name)} ${statLabel(rowStat(s, r), sideActor(s, r.ice))}`).join(", ")}</p><div class="cprnet-net-controls cprnet-defense-controls"></div>`);
     else if (!open.length && (quiet || stealth)) {
         // Going Quiet: what it means for the stealth
         const free = s.rows.every(r => r.outcome === "runner");
@@ -697,6 +804,14 @@ export function installedPrograms(actor, rezzedOnly = false) {
             result = onDeck;
     }
     return rezzedOnly ? result.filter(p => p.system?.isRezzed) : result;
+}
+/** Jack In: every program of the Netrunner starts derezzed (rezzing one costs a NET Action) – a module effect, never
+ *  counted; nothing is deleted or uninstalled */
+export async function derezAll(actor) {
+    const list = Array.from(actor?.items ?? []).filter(i => String(i.type) === "program" && i.system?.isRezzed);
+    if (list.length)
+        await actor.updateEmbeddedDocuments("Item", list.map(p => ({ _id: p.id, "system.isRezzed": false })), { cprnetModule: true });
+    return list.length;
 }
 export const progRezPath = (program) => typeof program?.system?.rez === "object" && program.system.rez !== null ? "system.rez.value" : "system.rez";
 export const progRez = (program) => Number(foundry.utils.getProperty(program, progRezPath(program)));
@@ -1142,6 +1257,7 @@ async function applyPatch(message, patch, userId) {
         if (!user?.isGM)
             return;
         s.state = "cancelled";
+        await refundCancelled(s);
     }
     if (patch.runnerRoll || patch.declined) {
         const runner = game.scenes?.get(s.scene)?.tokens?.get(s.runner.token);
@@ -1216,15 +1332,19 @@ async function applyPatch(message, patch, userId) {
         resolve(s);
     pickPrograms(s);
     await message.update({ content: cardHTML(s), [`flags.${MODULE}.${CARD_FLAG}`]: s });
-    const dice = [...(patch.rowRoll?.roll.dice ?? []).map(d => [d, patch.rowRoll.roll.roller]), ...(patch.rowDamage?.damage.dice ?? []).map(d => [d, patch.rowDamage.damage.roller]),
-        ...(patch.runnerRoll?.dice ?? []).map(d => [d, patch.runnerRoll.roller]), ...(patch.iceRoll?.dice ?? []).map(d => [d, patch.iceRoll.roller]), ...(patch.damage?.dice ?? []).map(d => [d, patch.damage.roller])];
+    // Going Quiet, hidden: the GM's rolls (row rolls, the Watcher's search) only for the GM
+    const gmMode = hiddenCard(s) ? "gmonly" : "publicroll";
+    const dice = [...(patch.rowRoll?.roll.dice ?? []).map(d => [d, patch.rowRoll.roll.roller, gmMode]), ...(patch.rowDamage?.damage.dice ?? []).map(d => [d, patch.rowDamage.damage.roller]),
+        ...(patch.runnerRoll?.dice ?? []).map(d => [d, patch.runnerRoll.roller]), ...(patch.iceRoll?.dice ?? []).map(d => [d, patch.iceRoll.roller, gmMode]), ...(patch.damage?.dice ?? []).map(d => [d, patch.damage.roller])];
     // the ICE's hidden attack roll is shown when the exchange resolves
     // (only once – later changes such as Apply / On Fire must not roll them again)
     if (!wasResolved && s.state === "resolved" && s.type === "ice-vs-runner" && s.iceRoll && !patch.iceRoll)
-        dice.push(...s.iceRoll.dice.map(d => [d, s.iceRoll.roller]));
+        dice.push(...s.iceRoll.dice.map(d => [d, s.iceRoll.roller, gmMode]));
+    // Going Quiet, private stealth card: the other dice only for the GMs and the Netrunner's owners
+    const audience = stealthPrivate(s) ? stealthAudience(s) : undefined;
     // CPR's dice handler synchronises Dice So Nice for everybody – one client shows them
-    for (const [json, roller] of dice)
-        void showSavedDice([json], "publicroll", roller).catch(() => { });
+    for (const [json, roller, mode] of dice)
+        void showSavedDice([json], mode ?? (audience ? "gmroll" : "publicroll"), roller, mode ? undefined : audience).catch(() => { });
 }
 export async function send(message, patch) {
     if (game.user?.isGM)
@@ -1245,6 +1365,18 @@ export async function runNetAction(runner, actionId, floor) {
         return void ui.notifications.warn(`You do not own ${runner.name}.`);
     // every action the Netrunner chooses costs a NET Action (the Speed check against Black ICE is a reaction)
     const cost = COSTS_ACTION.has(action.id) ? 1 : 0;
+    // Sword / Banhammer: every installed copy once per round
+    const attacker = action.id in ATTACKER_NAME && countsNow(runner) ? action.id : null;
+    if (attacker) {
+        const { copies, left, blocking } = attackerLeft(runner, attacker);
+        if (left <= 0 && blocking) {
+            const text = `${runner.name} has used every ${action.label.replace(/ attack$/, "")} this round (${copies} installed) – each copy attacks once per round.`;
+            if (!game.user?.isGM)
+                return void ui.notifications.warn(text);
+            if (!await Dialog.confirm({ title: action.label, content: `<p>${esc(text)}</p><p>Attack anyway?</p>`, defaultYes: false }))
+                return;
+        }
+    }
     if (cost && !(await canSpendNetActions(runner, cost, action.label)))
         return;
     const all = floor.ice ?? [];
@@ -1252,7 +1384,9 @@ export async function runNetAction(runner, actionId, floor) {
     if (!roll || !Number.isFinite(roll.total))
         return;
     const s = { type: action.versus ? "runner-vs-ice" : "check", action: action.id, scene: runner.parent.id, floor: floor.label, tile: floor.tile?.id,
-        runner: side(runner), runnerRoll: roll, state: "waiting" };
+        runner: side(runner), runnerRoll: roll, state: "waiting",
+        // what this card used – given back when the GM cancels it in the same round
+        spent: { cost: countsNow(runner) ? cost : 0, attacker, round: roundKey(runner) } };
     // Speed / Slide: every Black ICE on the floor rolls – Demons are only named (no Slide away from a Demon,
     // and only Black ICE lies in wait); Zap: one target, Black ICE or Demon
     // Speed: every Black ICE rolls (one row each); Slide: one row per Black ICE – the GM rolls the PER of the ICE the
@@ -1271,14 +1405,32 @@ export async function runNetAction(runner, actionId, floor) {
         resolve(s);
     await ChatMessage.create({ speaker: ChatMessage.getSpeaker({ actor: runner.actor, token: runner }), content: cardHTML(s), flags: { [MODULE]: { [CARD_FLAG]: s } } });
     await spendNetActions(runner, cost);
+    if (attacker)
+        await runner.update({ [`flags.${MODULE}.${ATTACK_USES_FLAG}.${attacker}`]: usesOf(runner, attacker) + 1 }).catch(error => console.warn(MODULE, "attack uses", error));
     for (const json of roll.dice)
         void showSavedDice([json], "publicroll", roll.roller).catch(() => { });
+}
+/** GM, a card is cancelled: its NET Action and its Sword / Banhammer use are given back – only in the same round
+ *  (a new round has reset both counters anyway) */
+async function refundCancelled(s) {
+    const spent = s.spent;
+    const token = game.scenes?.get(s.scene)?.tokens?.get(s.runner?.token ?? "");
+    if (!spent || spent.refunded || !token || spent.round !== roundKey(token))
+        return;
+    spent.refunded = true;
+    const u = {};
+    if (spent.cost)
+        u[`flags.${MODULE}.${ACTIONS_FLAG}`] = Math.max(0, (Number(foundry.utils.getProperty(token, `flags.${MODULE}.${ACTIONS_FLAG}`) ?? 0) || 0) - spent.cost);
+    if (spent.attacker && usesOf(token, spent.attacker) > 0)
+        u[`flags.${MODULE}.${ATTACK_USES_FLAG}.${spent.attacker}`] = usesOf(token, spent.attacker) - 1;
+    if (Object.keys(u).length)
+        await token.update(u).catch(error => console.warn(MODULE, "refund", error));
 }
 /** Going Quiet: Quiet Jack In (against every Watcher in the architecture) or Evade Detection (against the Black ICE /
  *  Watchers met on a floor) – posted right away, the Netrunner's player rolls on the card, then the GM rolls each row */
 export async function postStealthCard(action, runner, floor, opponents) {
     const s = { type: "runner-vs-ice", action, scene: runner.parent.id, floor: floor.label, tile: floor.tile?.id, runner: side(runner),
-        rows: opponents.map(t => ({ ice: side(t) })), state: "waiting" };
+        rows: opponents.map(t => ({ ice: side(t) })), state: "waiting", owners: ownerIds(runner.actor) };
     resolve(s); // Quiet Jack In without any Watcher: established right away
     await ChatMessage.create({ speaker: ChatMessage.getSpeaker({ actor: runner.actor, token: runner }), content: cardHTML(s), flags: { [MODULE]: { [CARD_FLAG]: s } } });
 }
@@ -1290,12 +1442,14 @@ export async function startIceAction(ice, runner, stat, floorLabel) {
     if (!roll)
         return;
     const s = { type: "ice-vs-runner", action: stat, scene: runner.parent.id, floor: floorLabel, runner: side(runner), ice: side(ice), iceRoll: roll, state: "waiting",
-        effect: iceEffect(ice.actor) || undefined };
-    await ChatMessage.create({ speaker: ChatMessage.getSpeaker({ actor: ice.actor, token: ice }), content: cardHTML(s), flags: { [MODULE]: { [CARD_FLAG]: s } } });
+        effect: iceEffect(ice.actor) || undefined, owners: ownerIds(runner.actor) };
+    // Going Quiet, hidden: the searching Watcher stays anonymous for the players
+    const speaker = hiddenCard(s) ? { scene: runner.parent.id, alias: "Watcher" } : ChatMessage.getSpeaker({ actor: ice.actor, token: ice });
+    await ChatMessage.create({ speaker, content: cardHTML(s), flags: { [MODULE]: { [CARD_FLAG]: s } } });
     // the ICE's dice are shown when the Netrunner has answered (like the attack roll of an exchange)
     if (stat !== "atk")
         for (const json of roll.dice)
-            void showSavedDice([json], "publicroll", roll.roller).catch(() => { });
+            void showSavedDice([json], hiddenCard(s) ? "gmonly" : stealthPrivate(s) ? "gmroll" : "publicroll", roll.roller, !hiddenCard(s) && stealthPrivate(s) ? stealthAudience(s) : undefined).catch(() => { });
 }
 /** a card button in Pneuma's chat-button look: chat-buttons.ts styles every [data-net-button]
  *  (GM-only buttons get Pneuma's GM mark, "cancel" a red, "reset" an amber border, icon-only buttons are square) */
@@ -1340,6 +1494,12 @@ function decorate(message, root) {
     const s = foundry.utils.getProperty(message, `flags.${MODULE}.${CARD_FLAG}`);
     if (!s)
         return;
+    // Going Quiet: a stealth card of somebody else's Netrunner – not shown at all
+    if (stealthPrivate(s) && !seesStealthCard(s)) {
+        root.style.display = "none";
+        root.classList.add("cprnet-stealth-private");
+        return;
+    }
     if (s.type === "rvr")
         return decorateRvr(message, root, s);
     if (s.type === "unsafe")
@@ -1349,6 +1509,8 @@ function decorate(message, root) {
     const content = root.querySelector(".message-content");
     if (content && !content.querySelector(":scope > section.rollcard.cprnet-net-card"))
         content.innerHTML = cardHTML(s);
+    // Going Quiet, hidden: GM-only parts (Watcher names, the GM's rolls) for the GM, the neutral text for the players
+    root.querySelectorAll(game.user?.isGM ? ".cprnet-player-only" : ".cprnet-gm-only").forEach(el => el.remove());
     root.dataset.cprnetExchangeState = s.state === "resolved" ? "resolved" : s.state;
     root.dataset.cprnetOutcome = s.outcome === "success" || s.outcome === "runner" ? "hit" : s.outcome ? "miss" : "none";
     // left column like the combat cards: actor (speaker portrait) ↓ action ↓ target
@@ -1356,7 +1518,7 @@ function decorate(message, root) {
     if (sender) {
         const actorSide = s.type === "ice-vs-runner" ? s.ice : s.runner;
         const target = s.type === "ice-vs-runner" ? s.runner : s.ice;
-        sender.textContent = actorSide?.name ?? "";
+        sender.textContent = s.type === "ice-vs-runner" && hiddenCard(s) && !game.user?.isGM ? "Watcher" : actorSide?.name ?? "";
         sender.parentElement?.querySelector(".cprnet-net-target")?.remove();
         const tile = s.tile ? game.scenes?.get(s.scene)?.tiles?.get(s.tile) : undefined;
         const img = target?.img ?? (tile?.texture?.src ? String(tile.texture.src) : "");
@@ -1411,7 +1573,7 @@ function decorate(message, root) {
                     return;
                 const stat = rowStat(s, row);
                 controls.append(button(`${row.ice.name} ${statLabel(stat, ice.actor)}`, "fa-dice-d10", async () => {
-                    const roll = await iceRoll(ice, stat);
+                    const roll = await iceRoll(ice, stat, false, s.action !== "quietjack");
                     if (roll)
                         await send(message, { rowRoll: { index, roll } });
                 }, true, `Roll ${row.ice.name}'s ${statLabel(stat, ice.actor)} + 1d10`));

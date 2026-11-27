@@ -1,4 +1,4 @@
-# NET Architecture (Cyberpunk RED) v1.7.6
+# NET Architecture (Cyberpunk RED) v1.8.1
 
 Run Cyberpunk RED NET Architectures in **Foundry VTT V12** – Access Points, Jack In / Jack Out, a live NET window and all NET actions with chat cards.
 Made with Claude.ai.
@@ -26,7 +26,9 @@ This module brings the **tools** to run a NET Architecture – **not the NET con
 - Runners only see the floors they have already reached
 - All **NET actions** with chat cards and the system's own dice (Dice So Nice works)
 - **New controls:** left-click a token to make it active (Tab cycles), left-click a floor or use the arrow keys to move, right-click a token for the active token's actions against it – the GM can steer every Netrunner, Black ICE and Demon
-- Attack Black ICE & Demons with **Zap, Sword or Banhammer**
+- Attack Black ICE & Demons with **Zap, Sword or Banhammer** – Sword and Banhammer show how many copies are left this round (each installed copy attacks once per round)
+- **Count only in combat** (option, on by default): NET Actions and Sword / Banhammer uses are only counted while the Netrunner is in a started combat
+- **Cancel** a card in the same round and its NET Action (and Sword / Banhammer use) is given back
 - **Netrunner vs Netrunner:** Zap, Vrizzbolt, Hellbolt, Nervescrub, Poison Flatline, Superglue, DeckKRASH and attacks on the target's rezzed programs – Flak, Shield and Armor count automatically, every effect is applied by the GM on the chat card and can be undone in the Jack Out summary
 - **Unsafe Jack Out** (DeckKRASH or from the menu, also while Superglued): a card lists every rezzed Black ICE the Netrunner met – the GM rolls and applies each effect, with Undo there and in the Jack Out summary
 - **Unplug all Netrunners** (GM): every Netrunner jacks out with its Jack Out summary, other player tokens are removed – only Black ICE and Demons stay
@@ -49,7 +51,7 @@ This module brings the **tools** to run a NET Architecture – **not the NET con
 ```
 https://github.com/Dantocks/cpr-net-architecture/releases/latest/download/module.json
 ```
-**Manual:** download `cpr-net-architecture_v1.7.6.zip` from the latest release and unzip it into `Data/modules/cpr-net-architecture/`.
+**Manual:** download `cpr-net-architecture_v1.8.1.zip` from the latest release and unzip it into `Data/modules/cpr-net-architecture/`.
 
 Then:
 1. Restart Foundry if needed

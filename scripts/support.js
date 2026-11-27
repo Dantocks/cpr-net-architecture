@@ -85,15 +85,22 @@ export function diceJSON(roll) {
     return [roll._roll, roll._critRoll].filter((die) => !!die).map(die => JSON.stringify(die.toJSON()));
 }
 /** show dice that were rolled hidden (Dice So Nice: as the user who rolled) */
-export async function showSavedDice(dice, mode, userId) {
+export async function showSavedDice(dice, mode, userId, audience) {
+    // "gmonly": only the GMs see the dice (Going Quiet: hidden GM rolls)
+    if (mode === "gmonly") {
+        audience = { whisper: Array.from(game.users?.values() ?? []).filter(u => u.isGM).map(u => u.id), blind: false };
+        mode = "gmroll";
+    }
     const ct = await combatToolsDice();
-    if (ct) return ct.showSavedDice(dice, mode, userId);
+    if (ct) return ct.showSavedDice(dice, mode, userId, audience);
     const { Dice } = await nativeAPI();
     const user = userId ? game.users?.get(userId) : undefined;
     await Promise.all(dice.map(async (json) => {
         const roll = Roll.fromJSON(json);
         if (user && game.modules?.get("dice-so-nice")?.active && game.dice3d?.showForRoll)
-            return game.dice3d.showForRoll(roll, user, true, null, false);
+            return game.dice3d.showForRoll(roll, user, true, audience?.whisper ?? null, false);
+        if (audience)
+            return game.user?.isGM ? Dice.handle3dDice(roll, mode) : undefined;
         return Dice.handle3dDice(roll, mode);
     }));
 }
@@ -121,6 +128,32 @@ export async function applyCombatStatus(actor, id) {
 
 // ---------- NET Actions counter (per Netrunner token in the NET scene) ----------
 export const ACTIONS_FLAG = "netActions";
+/** the started combat this Netrunner takes part in – its NET token or its body in meat space (the token it jacked in
+ *  from) is a combatant. Another combat somewhere else does not count. */
+export function combatOf(token) {
+    if (!token)
+        return undefined;
+    const source = foundry.utils.getProperty(token, `flags.${MODULE}.netrun.source`);
+    for (const combat of Array.from(game.combats ?? [])) {
+        if (!combat.started)
+            continue;
+        const hit = Array.from(combat.combatants ?? []).some(cb => cb.tokenId === token.id || (source && cb.token?.uuid === source)
+            || (token.actorLink && cb.actorId && cb.actorId === token.actorId && cb.token?.actorLink));
+        if (hit)
+            return combat;
+    }
+    return undefined;
+}
+/** option "NET: count only in combat": NET Actions and Sword / Banhammer uses are only counted while the Netrunner is in a
+ *  started combat (off: always counted, back to 0 every new round) */
+export function countsNow(token) {
+    let only = true;
+    try {
+        only = game.settings.get(MODULE, "netCountOnlyInCombat") !== false;
+    }
+    catch { /* not registered yet */ }
+    return !only || !!combatOf(token);
+}
 /** NET Actions per Turn by Interface rank (Core p. 199): 1–3 → 2, 4–6 → 3, 7–9 → 4, 10 → 5 (0 = no Interface) */
 export function netActionsMax(actor) {
     const roles = actor?.itemTypes?.role ?? [];
@@ -142,7 +175,7 @@ export const netActionsOf = (doc) => Math.max(0, Number(foundry.utils.getPropert
  *  Player: a message, the action does not happen. GM: the same, with the option to go on anyway. */
 export async function canSpendNetActions(runner, cost, label) {
     const max = netActionsLimit(runner), used = netActionsOf(runner);
-    if (!max || used + cost <= max || !game.combats?.some((c) => c.started))
+    if (!max || used + cost <= max || !combatOf(runner))
         return true;
     const text = `${runner.name} has no NET Actions left this round (${used}/${max})${cost > 1 ? ` – ${label} needs ${cost}` : ""}.`;
     if (!game.user?.isGM) {
@@ -158,7 +191,7 @@ export async function canSpendNetActions(runner, cost, label) {
 }
 /** after a NET Action: count it on the Netrunner's token */
 export async function spendNetActions(runner, cost) {
-    if (!runner || !cost) return;
+    if (!runner || !cost || !countsNow(runner)) return;
     try { await runner.update({ [`flags.${MODULE}.${ACTIONS_FLAG}`]: netActionsOf(runner) + cost }); }
     catch (error) { console.warn(MODULE, "NET Actions counter", error); }
 }
