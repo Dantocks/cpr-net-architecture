@@ -1,4 +1,4 @@
-# NET Architecture (Cyberpunk RED) v1.5.12
+# NET Architecture (Cyberpunk RED) v1.7.6
 
 Run Cyberpunk RED NET Architectures in **Foundry VTT V12** – Access Points, Jack In / Jack Out, a live NET window and all NET actions with chat cards.
 Made with Claude.ai.
@@ -17,6 +17,7 @@ This module brings the **tools** to run a NET Architecture – **not the NET con
 <img width="907" height="360" alt="image" src="https://github.com/user-attachments/assets/e341c9ab-f0f9-4054-8053-dd7644af3b23" />
 <img width="513" height="369" alt="image" src="https://github.com/user-attachments/assets/4b6a92ff-72f5-4935-afc6-edb8b6378f5a" />
 <img width="289" height="686" alt="image" src="https://github.com/user-attachments/assets/4c70e548-911d-484c-a67c-51a0286af279" />
+<img width="510" height="546" alt="Screenshot 2026-11-27 185309" src="https://github.com/user-attachments/assets/7b66e3f3-2c1c-48d7-b888-684f8cb1aa94" />
 
 ## Features
 - Turns any token into an **Access Point** – configure it, lock/release it for players
@@ -32,6 +33,14 @@ This module brings the **tools** to run a NET Architecture – **not the NET con
 - **Black ICE & Demons** fight back – damage, effects and status are applied automatically
 - **NET Actions counter** in the Netrunner's window – counts Jack In (quiet: 2) and every NET Action the Netrunner uses, blocks further ones when used up during combat (GM can override), ▲ / ▼ to correct, back to 0 every new round
 - **Going Quiet** and optional automatic **Lying in Wait**
+- **Going Quiet, hidden GM rolls** (option, on by default): players don't see which Watchers check them or the GM's rolls – only their own roll and whether they stay undetected
+- **Going Quiet, private stealth cards** (option, on by default): Quiet Jack In, Evade Detection and Watcher searches – card and dice – only for the GM and the stealthed Netrunner's owners
+- **Stealthed Netrunners** are invisible to other players in the NET window and keep to the edge of a floor – a visible Netrunner's position never gives them away
+- **NPC Netrunners** in the architecture: the GM moves them like Netrunners, searches with them (Interface from their NET role + Pathfinder) and fights runner vs runner in both directions – they stay Watchers
+- **Programs** in the Netrunner's right-click menu: click the row to rez / derez (1 NET Action, also counted when a player does it on the sheet), click the name to open the program – every program starts derezzed at Jack In; hover an NPC Netrunner to see its rezzed programs
+- **Range to the Access Point** (option: 6 m, 8 m or off): no Jack In out of range; if the body leaves the range during a run, the GM gets an "Out of range" card with Unsafe Jack Out
+- **Open NET view** on the Access Point (eye icon) – Jack In again simply reopens the running window
+- Player moves in the NET go through the GM's client – Combat Tools' movement mode never blocks them
 - Link a journal with your NET rules for quick reference
 - Live sync – GM and players see the same state
 
@@ -40,7 +49,7 @@ This module brings the **tools** to run a NET Architecture – **not the NET con
 ```
 https://github.com/Dantocks/cpr-net-architecture/releases/latest/download/module.json
 ```
-**Manual:** download `cpr-net-architecture_v1.5.12.zip` from the latest release and unzip it into `Data/modules/cpr-net-architecture/`.
+**Manual:** download `cpr-net-architecture_v1.7.6.zip` from the latest release and unzip it into `Data/modules/cpr-net-architecture/`.
 
 Then:
 1. Restart Foundry if needed
